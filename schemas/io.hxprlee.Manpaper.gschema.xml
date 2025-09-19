@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="io.hxprlee.Manpaper" path="/io/hxprlee/Manpaper/">
+    <key name="wallpaper-dir" type="s">
+      <default>''</default>
+      <summary>The directory where wallpapers are stored.</summary>
+    </key>
+    <key name="static-backend" type="s">
+      <default>'swaybg'</default>
+      <summary>The backend to use for static wallpapers.</summary>
+    </key>
+    <key name="live-backend" type="s">
+      <default>'mpvpaper'</default>
+      <summary>The backend to use for live wallpapers.</summary>
+    </key>
+    <key name="preview-size" type="i">
+      <default>160</default>
+      <summary>The size of the wallpaper previews in pixels.</summary>
+    </key>
+    <key name="scroll-step" type="i">
+      <default>8</default>
+      <summary>The step increment for zooming with the scroll wheel.</summary>
+    </key>
+    <key name="show-labels" type="b">
+      <default>false</default>
+      <summary>Whether to show labels under wallpaper previews.</summary>
+    </key>
+    <key name="corner-radius" type="i">
+      <default>12</default>
+      <summary>The corner radius for wallpaper previews.</summary>
+    </key>
+    <key name="use-custom-css" type="b">
+      <default>false</default>
+      <summary>Whether to use a custom CSS file for theming.</summary>
+    </key>
+    <key name="custom-css-path" type="s">
+      <default>''</default>
+      <summary>The path to the custom CSS file.</summary>
+    </key>
+    <key name="hide-original-after-recode" type="b">
+      <default>false</default>
+      <summary>Whether to hide original videos after a recoded version is created.</summary>
+    </key>
+    <key name="enable-video-sound" type="b">
+      <default>false</default>
+      <summary>Whether to enable sound for video wallpapers.</summary>
+    </key>
+    <key name="video-volume" type="i">
+      <default>100</default>
+      <summary>The volume for video wallpapers (0-150).</summary>
+    </key>
+    <key name="mpv-socket-path" type="s">
+      <default>'/tmp/mpvsocket'</default>
+      <summary>The IPC socket path for controlling mpvpaper.</summary>
+    </key>
+    <key name="swww-transition-type" type="s">
+        <default>'simple'</default>
+        <summary>The transition animation type for swww.</summary>
+    </key>
+    <key name="swww-transition-duration" type="i">
+        <default>2</default>
+        <summary>The transition animation duration for swww.</summary>
+    </key>
+    <key name="swww-fill-type" type="s">
+        <default>'Crop'</default>
+        <summary>The screen fill type for swww.</summary>
+    </key>
+    <key name="swww-transition-fps" type="i">
+        <default>0</default>
+        <summary>The transition frame rate for swww. Defaults to monitor refresh rate on first launch.</summary>
+    </key>
+  </schema>
+</schemalist>

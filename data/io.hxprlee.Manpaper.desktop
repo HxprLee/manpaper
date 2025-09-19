@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Manpaper
+Exec=manpaper.sh
+Icon=io.hxprlee.Manpaper
+Type=Application
+Categories=Utility;
