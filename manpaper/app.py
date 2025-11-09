@@ -348,13 +348,17 @@ class Manpaper(Adw.Application):
         self.load_more_button.add_css_class("pill")
         self.load_more_button.add_css_class("suggested-action")
         self.load_more_button.set_halign(Gtk.Align.CENTER)
-        self.load_more_button.set_margin_top(12)
-        self.load_more_button.set_margin_bottom(12)
-        self.load_more_button.connect("clicked", self._on_load_more_online_wallpapers_clicked)
-        online_page_box.append(self.load_more_button)
-
         online_page = self.view_stack.add_titled(online_page_box, 'online', 'Online')
         online_page.set_icon_name('globe-symbolic')
+
+        self.load_more_button = Gtk.Button(label="Load More")
+        self.load_more_button.add_css_class("pill")
+        self.load_more_button.add_css_class("suggested-action")
+        self.load_more_button.connect("clicked", self._on_load_more_online_wallpapers_clicked)
+
+        self.load_more_button_revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_UP, transition_duration=300, reveal_child=False, halign=Gtk.Align.CENTER, valign=Gtk.Align.END, margin_bottom=24)
+        self.load_more_button_revealer.set_child(self.load_more_button)
+        self.load_more_button_revealer.add_css_class("pill-revealer")
 
                 
         prefs_view = self.prefs_window.create_preferences_view()
@@ -422,6 +426,7 @@ class Manpaper(Adw.Application):
         overlay.add_overlay(random_button_revealer)
         overlay.add_overlay(self.add_button_revealer)
         overlay.add_overlay(self.filter_button_revealer) # Add the new filter button revealer
+        overlay.add_overlay(self.load_more_button_revealer)
         content.set_content(overlay)
         
         self.toast_overlay = Adw.ToastOverlay(child=content)
@@ -1027,6 +1032,7 @@ class Manpaper(Adw.Application):
         is_online = stack.get_visible_child_name() == "online"
         # self.purity_revealer.set_reveal_child(is_online) # Removed, now controlled by filter button
         self.filter_button_revealer.set_reveal_child(is_online) # Control new filter button
+        self.load_more_button_revealer.set_reveal_child(is_online) # Control load more button
         if is_online:
             self._trigger_online_search(latest=True)
 
