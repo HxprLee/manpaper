@@ -69,5 +69,15 @@
         <default>0</default>
         <summary>The transition frame rate for swww. Defaults to monitor refresh rate on first launch.</summary>
     </key>
+    <key name="mpvpaper-fill-type" type="s">
+      <default>'Fit'</default>
+      <summary>The fill type for mpvpaper</summary>
+      <description>Can be 'Fit' or 'Crop'.</description>
+    </key>
+    <key name="video-bookmarks" type="s">
+      <default>'[]'</default>
+      <summary>List of video bookmarks with titles</summary>
+      <description>A JSON string representing an array of objects, each with a 'url' and 'title'.</description>
+    </key>
   </schema>
 </schemalist>
