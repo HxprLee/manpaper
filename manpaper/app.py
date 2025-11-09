@@ -40,6 +40,7 @@ class Manpaper(Adw.Application):
         self.toast_overlay = None
         self.search_text = ""
         self.online_search_text = ""
+        self.online_current_page = 1
         self.right_clicked_item = None
         self.mpv_process = None
 
@@ -342,8 +343,19 @@ class Manpaper(Adw.Application):
         scrolled_online_view = self._create_scrolled_window(self.online_view)
         scrolled_online_view.set_vexpand(True)
         online_page_box.append(scrolled_online_view)
+
+        self.load_more_button = Gtk.Button(label="Load More")
+        self.load_more_button.add_css_class("pill")
+        self.load_more_button.add_css_class("suggested-action")
+        self.load_more_button.set_halign(Gtk.Align.CENTER)
+        self.load_more_button.set_margin_top(12)
+        self.load_more_button.set_margin_bottom(12)
+        self.load_more_button.connect("clicked", self._on_load_more_online_wallpapers_clicked)
+        online_page_box.append(self.load_more_button)
+
         online_page = self.view_stack.add_titled(online_page_box, 'online', 'Online')
-        online_page.set_icon_name('cloud-download-symbolic')
+        online_page.set_icon_name('globe-symbolic')
+
                 
         prefs_view = self.prefs_window.create_preferences_view()
         prefs_page = self.view_stack.add_titled(prefs_view, 'preferences', 'Config')
@@ -1494,6 +1506,11 @@ class Manpaper(Adw.Application):
         else:
             self.toast_overlay.add_toast(Adw.Toast.new("No wallpapers to choose from."))
 
+    def _on_load_more_online_wallpapers_clicked(self, button):
+        """Loads the next page of online wallpapers."""
+        self.online_current_page += 1
+        self._trigger_online_search(latest=False, page=self.online_current_page)
+
     def _on_list_item_right_clicked(self, gesture, n_press, x, y, list_item):
         """Handles right-click on a wallpaper list item."""
         item = list_item.get_item()
@@ -1921,47 +1938,50 @@ class Manpaper(Adw.Application):
         if self.view_stack.get_visible_child_name() == 'online' and self.online_search_text:
             self._trigger_online_search()
 
-    def _trigger_online_search(self, latest=False):
+    def _trigger_online_search(self, latest=False, page=1):
         """Triggers a search for online wallpapers."""
         print("Triggering online search...")
-        query = self.online_search_text
-        
         if latest:
-            query = ""
-        elif not query:
-            return
+            self.online_current_page = 1
+        else:
+            self.online_current_page = page
 
+        query = self.online_search_text
         api_key = self.settings.get_string('wallhaven-api-key')
+        
         if not api_key:
-            self.toast_overlay.add_toast(Adw.Toast.new("Wallhaven API key is not set."))
+            self.toast_overlay.add_toast(Adw.Toast.new("Wallhaven API key not set in preferences."))
             return
 
         self.background_tasks += 1
         self._update_spinner()
+        threading.Thread(target=self._online_search_thread, args=(query, api_key, self.sfw_switch.get_active(), self.sketchy_switch.get_active(), self.nsfw_switch.get_active(), self.general_switch.get_active(), self.anime_switch.get_active(), self.people_switch.get_active(), self.online_current_page), daemon=True).start()
 
-        threading.Thread(target=self._online_search_thread, args=(query, api_key, self.sfw_switch.get_active(), self.sketchy_switch.get_active(), self.nsfw_switch.get_active(), self.general_switch.get_active(), self.anime_switch.get_active(), self.people_switch.get_active()), daemon=True).start()
-
-    def _online_search_thread(self, query, api_key, sfw, sketchy, nsfw, general, anime, people):
+    def _online_search_thread(self, query, api_key, sfw, sketchy, nsfw, general, anime, people, page):
         """Runs the online search in a background thread."""
-        results = search_wallhaven(query, api_key, sfw, sketchy, nsfw, general, anime, people)
-        print(f"Wallhaven API raw results: {results}")
+        results = search_wallhaven(query, api_key, sfw, sketchy, nsfw, general, anime, people, page)
         GLib.idle_add(self._on_online_search_finished, results)
 
     def _on_online_search_finished(self, results):
         """Updates the online store after the search is finished."""
         self.background_tasks -= 1
         self._update_spinner()
-        print(f"Processed online search results: {results}")
 
-        if isinstance(results, dict) and "error" in results:
-            self.toast_overlay.add_toast(Adw.Toast.new(f"Error: {results['error']}"))
+        if "error" in results:
+            self.toast_overlay.add_toast(Adw.Toast.new(f"Online search error: {results['error']}"))
             return
 
-        self.online_store.splice(0, self.online_store.get_n_items(), results)
+        print(f"Processed online search results: {results}")
         
-        # Signal that the filter has changed
+        if self.online_current_page == 1:
+            self.online_store.splice(0, self.online_store.get_n_items(), []) # Clear existing items
+            for item in results:
+                self.online_store.append(item)
+        else:
+            for item in results:
+                self.online_store.append(item)
+        
         # self.online_filter.changed(Gtk.FilterChange.DIFFERENT) # Reverted to this
-
         self._update_status_page_visibility()
 
     def _update_status_page_visibility(self):
