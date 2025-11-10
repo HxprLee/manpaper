@@ -676,28 +676,36 @@ class Manpaper(Adw.Application):
         revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_UP, transition_duration=300)
         item_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         
-        picture = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, halign=Gtk.Align.CENTER)
-        download_button = Gtk.Button(icon_name="folder-download-symbolic", tooltip_text="Download Wallpaper")
-        download_button.add_css_class("circular")
-        # download_button.add_css_class("flat") # Removed flat style
-        download_button.add_css_class("drop-shadow") # Add a new class for drop shadow
-        download_button.set_halign(Gtk.Align.END)
-        download_button.set_valign(Gtk.Align.START)
-        download_button.set_margin_top(6)
-        download_button.set_margin_end(6)
+        list_item.picture = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, halign=Gtk.Align.CENTER)
+        list_item.download_button = Gtk.Button(icon_name="folder-download-symbolic", tooltip_text="Download Wallpaper")
+        list_item.download_button.add_css_class("circular")
+        # list_item.download_button.add_css_class("flat") # Removed flat style
+        list_item.download_button.add_css_class("drop-shadow") # Add a new class for drop shadow
+        list_item.download_button.set_halign(Gtk.Align.END)
+        list_item.download_button.set_valign(Gtk.Align.START)
+        list_item.download_button.set_margin_top(6)
+        list_item.download_button.set_margin_end(6)
+
+        list_item.resolution_label = Gtk.Label(halign=Gtk.Align.START, valign=Gtk.Align.END)
+        list_item.resolution_label.set_margin_top(6)
+        list_item.resolution_label.set_margin_bottom(6)
+        list_item.resolution_label.set_margin_start(6)
+        list_item.resolution_label.set_margin_end(6)
+        list_item.resolution_label.add_css_class("resolution-label")
 
         picture_overlay = Gtk.Overlay()
-        picture_overlay.set_child(picture)
-        picture_overlay.add_overlay(download_button)
+        picture_overlay.set_child(list_item.picture)
+        picture_overlay.add_overlay(list_item.download_button)
+        picture_overlay.add_overlay(list_item.resolution_label)
 
         label = Gtk.Label(wrap=True, max_width_chars=20, ellipsize=Pango.EllipsizeMode.END, halign=Gtk.Align.CENTER)
         
         # Create a revealer for the label
-        label_revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_DOWN, transition_duration=250)
-        label_revealer.set_child(label)
+        list_item.label_revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_DOWN, transition_duration=250)
+        list_item.label_revealer.set_child(label)
 
         item_box.append(picture_overlay) # Append the overlay instead of the picture
-        item_box.append(label_revealer) # Append the revealer instead of the label
+        item_box.append(list_item.label_revealer) # Append the revealer instead of the label
         
         revealer.set_child(item_box)
         list_item.set_child(revealer)
@@ -716,16 +724,10 @@ class Manpaper(Adw.Application):
 
     def _on_online_factory_bind(self, factory, list_item):
         """Binds data to an online list item widget."""
-        revealer = list_item.get_child()
-        item_box = revealer.get_child()
-        picture_overlay = item_box.get_first_child()
-        picture = picture_overlay.get_child()
-        download_button = picture_overlay.get_last_child() # Get the download button from the overlay
-        label_revealer = item_box.get_last_child()
-        label = label_revealer.get_child()
-
         item = list_item.get_item()
         if not isinstance(item, OnlineWallpaperItem): return
+
+        list_item.resolution_label.set_text(item.resolution or "")
 
         # Initialize download status and local path
         local_path = self._get_online_wallpaper_local_path(item)
@@ -734,35 +736,35 @@ class Manpaper(Adw.Application):
 
         def on_size_changed(item_obj):
             print(f"    on_size_changed (online) for {item.wall_id}: self.show_labels={self.show_labels}")
-            picture.set_size_request(self.preview_size, int(self.preview_size * self.aspect_ratio))
-            label_revealer.set_reveal_child(self.show_labels)
-            item_box.set_spacing(4 if self.show_labels else 0)
+            list_item.picture.set_size_request(self.preview_size, int(self.preview_size * self.aspect_ratio))
+            list_item.label_revealer.set_reveal_child(self.show_labels)
+            list_item.get_child().get_child().set_spacing(4 if self.show_labels else 0)
         
         list_item.handler_id = item.connect('preview-size-changed', on_size_changed)
         on_size_changed(item)
         print(f"  _on_online_factory_bind for {item.wall_id}: self.show_labels={self.show_labels}")
 
-        label.set_text(item.title or item.wall_id) # Use title or wall_id for label
+        list_item.label_revealer.get_child().set_text(item.title or item.wall_id) # Use title or wall_id for label
 
-        self._load_online_thumbnail(item, picture)
+        self._load_online_thumbnail(item, list_item.picture)
 
         # Function to update the button's appearance and signal connection
         def update_download_button_ui(item_obj, is_downloaded, local_path):
             if is_downloaded:
-                download_button.set_icon_name("emblem-ok-symbolic")
-                download_button.set_tooltip_text("Apply Wallpaper")
+                list_item.download_button.set_icon_name("emblem-ok-symbolic")
+                list_item.download_button.set_tooltip_text("Apply Wallpaper")
                 # Disconnect previous handler if any
-                if hasattr(download_button, 'handler_id') and download_button.handler_id > 0:
-                    download_button.disconnect(download_button.handler_id)
-                download_button.handler_id = download_button.connect("clicked", self._on_apply_downloaded_wallpaper_clicked, item)
+                if hasattr(list_item.download_button, 'handler_id') and list_item.download_button.handler_id > 0:
+                    list_item.download_button.disconnect(list_item.download_button.handler_id)
+                list_item.download_button.handler_id = list_item.download_button.connect("clicked", self._on_apply_downloaded_wallpaper_clicked, item)
             else:
-                download_button.set_icon_name("folder-download-symbolic")
-                download_button.set_tooltip_text("Download Wallpaper")
+                list_item.download_button.set_icon_name("folder-download-symbolic")
+                list_item.download_button.set_tooltip_text("Download Wallpaper")
                 # Disconnect previous handler if any
-                if hasattr(download_button, 'handler_id') and download_button.handler_id > 0:
-                    download_button.disconnect(download_button.handler_id)
-                download_button.handler_id = download_button.connect("clicked", self._on_download_wallpaper_clicked, item)
-            download_button.set_sensitive(True) # Always sensitive, but action changes
+                if hasattr(list_item.download_button, 'handler_id') and list_item.download_button.handler_id > 0:
+                    list_item.download_button.disconnect(list_item.download_button.handler_id)
+                list_item.download_button.handler_id = list_item.download_button.connect("clicked", self._on_download_wallpaper_clicked, item)
+            list_item.download_button.set_sensitive(True) # Always sensitive, but action changes
 
         # Initial UI update
         update_download_button_ui(item, item.is_downloaded, item.local_path)
@@ -772,8 +774,8 @@ class Manpaper(Adw.Application):
             item.disconnect(list_item.download_status_handler_id)
         list_item.download_status_handler_id = item.connect('download-status-changed', update_download_button_ui)
         
-        revealer.set_reveal_child(False)
-        GLib.timeout_add(list_item.get_position() * 40, lambda: (revealer.set_reveal_child(True), GLib.SOURCE_REMOVE)[1])
+        list_item.get_child().set_reveal_child(False)
+        GLib.timeout_add(list_item.get_position() * 40, lambda: (list_item.get_child().set_reveal_child(True), GLib.SOURCE_REMOVE)[1])
 
     def _get_online_wallpaper_local_path(self, item):
         """Determines the expected local path for a downloaded online wallpaper."""
@@ -990,6 +992,13 @@ class Manpaper(Adw.Application):
             .scrolled-list { color: transparent; border-radius: 16px; }
             .drop-shadow {
                 box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+            }
+            .resolution-label {
+                background-color: rgba(0, 0, 0, 0.5);
+                color: white;
+                padding: 2px 6px;
+                border-radius: 4px;
+                font-size: 0.8em;
             }
         '''
         self.css_provider.load_from_string(default_css)

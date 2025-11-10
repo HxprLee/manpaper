@@ -40,17 +40,19 @@ class OnlineWallpaperItem(GObject.Object):
     thumbnail_url = GObject.Property(type=str)
     full_url = GObject.Property(type=str)
     purity = GObject.Property(type=str)
+    resolution = GObject.Property(type=str)
     path = GObject.Property(type=str) # Added for consistency with WallpaperItem
     title = GObject.Property(type=str) # Added for consistency with WallpaperItem
     is_downloaded = GObject.Property(type=bool, default=False)
     local_path = GObject.Property(type=str, default=None)
 
-    def __init__(self, wall_id, thumbnail_url, full_url, purity, is_downloaded=False, local_path=None):
+    def __init__(self, wall_id, thumbnail_url, full_url, purity, resolution, is_downloaded=False, local_path=None):
         super().__init__()
         self.wall_id = wall_id
         self.thumbnail_url = thumbnail_url
         self.full_url = full_url
         self.purity = purity
+        self.resolution = resolution
         self.path = full_url # Use full_url as path
         self.title = wall_id # Use wall_id as title by default
         self.is_downloaded = is_downloaded

@@ -41,7 +41,8 @@ def search_wallhaven(query: str, api_key: str, sfw: bool, sketchy: bool, nsfw: b
                 wall_id=wall.get("id"),
                 thumbnail_url=wall.get("thumbs", {}).get("small"),
                 full_url=wall.get("path"),
-                purity=wall.get("purity")
+                purity=wall.get("purity"),
+                resolution=wall.get("resolution")
             )
             results.append(item)
         return results
