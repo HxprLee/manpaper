@@ -41,6 +41,9 @@ class Manpaper(Adw.Application):
         self.search_text = ""
         self.online_search_text = ""
         self.online_current_page = 1
+        self.online_resolution_text = ""
+        self.online_atleast_text = ""
+        self.online_ratio_text = ""
         self.right_clicked_item = None
         self.mpv_process = None
 
@@ -320,10 +323,27 @@ class Manpaper(Adw.Application):
         category_box.append(self.people_switch)
         online_filters_box.append(category_box)
 
-        # The online_filters_box will now be part of a popover attached to a new filter button
-        # self.purity_revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_DOWN, transition_duration=300)
-        # self.purity_revealer.set_child(online_filters_box)
-        # online_page_box.append(self.purity_revealer)
+        # Resolution filter
+        row_resolution = Adw.EntryRow(title="Resolution")
+        print(f"Type of row_resolution.get_child(): {type(row_resolution.get_child())}")
+        if hasattr(row_resolution.get_child(), 'get_children'):
+            for i, child in enumerate(row_resolution.get_child().get_children()):
+                print(f"  Child {i} of row_resolution.get_child(): {type(child)}")
+        row_resolution.set_text(self.settings.get_string('wallhaven-resolution'))
+        row_resolution.connect('changed', self._on_resolution_changed)
+        online_filters_box.append(row_resolution)
+
+        # Atleast (minimum resolution) filter
+        row_atleast = Adw.EntryRow(title="Minimum Resolution")
+        row_atleast.set_text(self.settings.get_string('wallhaven-atleast'))
+        row_atleast.connect('changed', self._on_atleast_changed)
+        online_filters_box.append(row_atleast)
+
+        # Aspect Ratio filter
+        row_ratio = Adw.EntryRow(title="Aspect Ratio")
+        row_ratio.set_text(self.settings.get_string('wallhaven-ratios'))
+        row_ratio.connect('changed', self._on_ratio_changed)
+        online_filters_box.append(row_ratio)
 
         self.sfw_switch.set_active(self.settings.get_boolean('wallhaven-purity-sfw'))
         self.sketchy_switch.set_active(self.settings.get_boolean('wallhaven-purity-sketchy'))
@@ -1441,8 +1461,6 @@ class Manpaper(Adw.Application):
                 if item.is_downloaded and item.local_path:
                     wallpaper_item = WallpaperItem(Path(item.local_path), title=item.title)
                     self._set_wallpaper(wallpaper_item)
-                else:
-                    self.toast_overlay.add_toast(Adw.Toast.new(f"Wallpaper {item.title} is not downloaded."))
             else:
                 self._set_wallpaper(item)
 
@@ -1941,7 +1959,31 @@ class Manpaper(Adw.Application):
         elif name == "people":
             self.settings.set_boolean('wallhaven-category-people', is_active)
 
-        if self.view_stack.get_visible_child_name() == 'online' and self.online_search_text:
+        if self.view_stack.get_visible_child_name() == 'online':
+            self._trigger_online_search()
+
+    def _on_resolution_changed(self, entry_row):
+        """Handles changes in the resolution entry."""
+        resolution_text = entry_row.get_text().strip()
+        self.settings.set_string('wallhaven-resolution', resolution_text)
+        self.online_resolution_text = resolution_text # Update internal state
+        if self.view_stack.get_visible_child_name() == 'online':
+            self._trigger_online_search()
+
+    def _on_atleast_changed(self, entry_row):
+        """Handles changes in the minimum resolution entry."""
+        atleast_text = entry_row.get_text().strip()
+        self.settings.set_string('wallhaven-atleast', atleast_text)
+        self.online_atleast_text = atleast_text # Update internal state
+        if self.view_stack.get_visible_child_name() == 'online':
+            self._trigger_online_search()
+
+    def _on_ratio_changed(self, entry_row):
+        """Handles changes in the aspect ratio entry."""
+        ratio_text = entry_row.get_text().strip()
+        self.settings.set_string('wallhaven-ratios', ratio_text)
+        self.online_ratio_text = ratio_text # Update internal state
+        if self.view_stack.get_visible_child_name() == 'online':
             self._trigger_online_search()
 
     def _trigger_online_search(self, latest=False, page=1):
@@ -1954,6 +1996,16 @@ class Manpaper(Adw.Application):
 
         query = self.online_search_text
         api_key = self.settings.get_string('wallhaven-api-key')
+        resolution = self.settings.get_string('wallhaven-resolution')
+        atleast = self.settings.get_string('wallhaven-atleast')
+        ratios = self.settings.get_string('wallhaven-ratios')
+
+        sfw = self.sfw_switch.get_active()
+        sketchy = self.sketchy_switch.get_active()
+        nsfw = self.nsfw_switch.get_active()
+        general = self.general_switch.get_active()
+        anime = self.anime_switch.get_active()
+        people = self.people_switch.get_active()
         
         if not api_key:
             self.toast_overlay.add_toast(Adw.Toast.new("Wallhaven API key not set in preferences."))
@@ -1961,11 +2013,11 @@ class Manpaper(Adw.Application):
 
         self.background_tasks += 1
         self._update_spinner()
-        threading.Thread(target=self._online_search_thread, args=(query, api_key, self.sfw_switch.get_active(), self.sketchy_switch.get_active(), self.nsfw_switch.get_active(), self.general_switch.get_active(), self.anime_switch.get_active(), self.people_switch.get_active(), self.online_current_page), daemon=True).start()
+        threading.Thread(target=self._online_search_thread, args=(query, api_key, sfw, sketchy, nsfw, general, anime, people, resolution, atleast, ratios, self.online_current_page), daemon=True).start()
 
-    def _online_search_thread(self, query, api_key, sfw, sketchy, nsfw, general, anime, people, page):
+    def _online_search_thread(self, query, api_key, sfw, sketchy, nsfw, general, anime, people, resolution, atleast, ratios, page):
         """Runs the online search in a background thread."""
-        results = search_wallhaven(query, api_key, sfw, sketchy, nsfw, general, anime, people, page)
+        results = search_wallhaven(query, api_key, sfw, sketchy, nsfw, general, anime, people, resolution, atleast, ratios, page)
         GLib.idle_add(self._on_online_search_finished, results)
 
     def _on_online_search_finished(self, results):

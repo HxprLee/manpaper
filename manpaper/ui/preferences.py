@@ -52,6 +52,14 @@ class PreferencesWindow:
         row_clear_cache.set_activatable_widget(clear_button)
         general_group.add(row_clear_cache)
 
+        online_group = Adw.PreferencesGroup(title="Online Settings")
+        preferences_page.add(online_group)
+
+        row_api_key = Adw.EntryRow(title="Wallhaven API Key")
+        row_api_key.set_text(self.settings.get_string('wallhaven-api-key'))
+        row_api_key.connect('changed', self._on_api_key_changed)
+        online_group.add(row_api_key)
+
         all_static_backends = ['swaybg', 'swww', 'hyprpaper']
         installed_static_backends = [b for b in all_static_backends if is_backend_installed(b)]
 
@@ -304,3 +312,7 @@ class PreferencesWindow:
         except GLib.Error as e:
             if not e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
                 print(f"Error selecting file: {e.message}")
+
+    def _on_api_key_changed(self, entry):
+        """Handles changes in the Wallhaven API key entry."""
+        self.app.settings.set_string('wallhaven-api-key', entry.get_text())

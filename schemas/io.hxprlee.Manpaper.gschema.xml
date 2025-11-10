@@ -79,5 +79,45 @@
       <summary>List of video bookmarks with titles</summary>
       <description>A JSON string representing an array of objects, each with a 'url' and 'title'.</description>
     </key>
+    <key name="wallhaven-resolution" type="s">
+      <default>''</default>
+      <summary>Resolution filter for Wallhaven API.</summary>
+    </key>
+    <key name="wallhaven-atleast" type="s">
+      <default>''</default>
+      <summary>Minimum resolution filter for Wallhaven API.</summary>
+    </key>
+    <key name="wallhaven-ratios" type="s">
+      <default>''</default>
+      <summary>Aspect ratio filter for Wallhaven API.</summary>
+    </key>
+    <key name="wallhaven-purity-sfw" type="b">
+      <default>true</default>
+      <summary>SFW purity filter for Wallhaven API.</summary>
+    </key>
+    <key name="wallhaven-purity-sketchy" type="b">
+      <default>false</default>
+      <summary>Sketchy purity filter for Wallhaven API.</summary>
+    </key>
+    <key name="wallhaven-purity-nsfw" type="b">
+      <default>false</default>
+      <summary>NSFW purity filter for Wallhaven API.</summary>
+    </key>
+    <key name="wallhaven-category-general" type="b">
+      <default>true</default>
+      <summary>General category filter for Wallhaven API.</summary>
+    </key>
+    <key name="wallhaven-category-anime" type="b">
+      <default>false</default>
+      <summary>Anime category filter for Wallhaven API.</summary>
+    </key>
+    <key name="wallhaven-category-people" type="b">
+      <default>false</default>
+      <summary>People category filter for Wallhaven API.</summary>
+    </key>
+    <key name="wallhaven-api-key" type="s">
+      <default>''</default>
+      <summary>Wallhaven API key for online searches.</summary>
+    </key>
   </schema>
 </schemalist>

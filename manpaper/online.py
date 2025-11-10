@@ -2,7 +2,7 @@
 import requests
 from .data_models import OnlineWallpaperItem
 
-def search_wallhaven(query: str, api_key: str, sfw: bool, sketchy: bool, nsfw: bool, general: bool, anime: bool, people: bool, page: int = 1):
+def search_wallhaven(query: str, api_key: str, sfw: bool, sketchy: bool, nsfw: bool, general: bool, anime: bool, people: bool, resolution: str, atleast: str, ratios: str, page: int = 1):
     """
     Searches Wallhaven for wallpapers.
     """
@@ -20,6 +20,12 @@ def search_wallhaven(query: str, api_key: str, sfw: bool, sketchy: bool, nsfw: b
     }
     if query:
         params['q'] = query
+    if resolution:
+        params['resolutions'] = resolution
+    if atleast:
+        params['atleast'] = atleast
+    if ratios:
+        params['ratios'] = ratios
     
     print(f"Triggering search with purity: SFW={sfw}, Sketchy={sketchy}, NSFW={nsfw}")
     print(f"Triggering search with categories: General={general}, Anime={anime}, People={people}")
