@@ -719,7 +719,7 @@ class Manpaper(Adw.Application):
         # Add context menu to each item's widget
         right_click_controller = Gtk.GestureClick.new()
         right_click_controller.set_button(Gdk.BUTTON_SECONDARY)
-        right_click_controller.connect("pressed", self._on_list_item_right_clicked, list_item)
+        right_click_controller.connect("pressed", self._on_online_list_item_right_clicked, list_item)
         revealer.add_controller(right_click_controller)
 
     def _on_online_factory_bind(self, factory, list_item):
@@ -844,6 +844,7 @@ class Manpaper(Adw.Application):
 
     def _on_download_finished(self, item, success, file_path=None, error_message=None, download_queue_item=None):
         """Callback after a wallpaper download is finished."""
+        print(f"DEBUG: _on_download_finished called for {item.wall_id}, success={success}")
         # Remove from download popover store
         if download_queue_item:
             for i in range(self.download_popover_store.get_n_items()):
@@ -857,7 +858,7 @@ class Manpaper(Adw.Application):
             item.is_downloaded = True
             item.local_path = str(file_path)
             item.emit('download-status-changed', True, str(file_path))
-            self._load_wallpapers_async()
+            self._load_wallpapers_async() # Reload after callback to ensure UI is updated
         else:
             self.toast_overlay.add_toast(Adw.Toast.new(f"Failed to download {item.wall_id}: {error_message}"))
 
@@ -949,6 +950,18 @@ class Manpaper(Adw.Application):
         action_add_local = Gio.SimpleAction(name="add_local")
         action_add_local.connect("activate", self._on_add_local_clicked)
         self.add_action(action_add_local)
+
+        action_download_online = Gio.SimpleAction(name="download_online_wallpaper")
+        action_download_online.connect("activate", self._on_download_online_wallpaper_activated)
+        self.add_action(action_download_online)
+
+        action_show_online_properties = Gio.SimpleAction(name="show_online_properties")
+        action_show_online_properties.connect("activate", self._on_show_online_properties_activated)
+        self.add_action(action_show_online_properties)
+
+        action_delete_online = Gio.SimpleAction(name="delete_online_wallpaper")
+        action_delete_online.connect("activate", self._on_delete_online_wallpaper_activated)
+        self.add_action(action_delete_online)
 
     def _setup_key_controller(self):
         """Sets up the main key controller for shortcuts."""
@@ -1475,6 +1488,7 @@ class Manpaper(Adw.Application):
 
     def _set_wallpaper(self, item):
         """Sets the system wallpaper using the configured backend."""
+        print(f"DEBUG: _set_wallpaper called for {item.path}")
         if not isinstance(item, WallpaperItem): return
 
         path = item.path
@@ -1558,6 +1572,125 @@ class Manpaper(Adw.Application):
         popover = Gtk.PopoverMenu.new_from_model(menu)
         popover.set_parent(list_item.get_child())
         popover.popup()
+
+    def _on_online_list_item_right_clicked(self, gesture, n_press, x, y, list_item):
+        """Handles right-click on an online wallpaper list item."""
+        item = list_item.get_item()
+        if not item: return
+
+        self.right_clicked_item = item
+        menu = Gio.Menu()
+        menu.append("Download", "app.download_online_wallpaper")
+        menu.append("Properties", "app.show_online_properties")
+        if item.is_downloaded:
+            menu.append("Delete", "app.delete_online_wallpaper")
+        
+        popover = Gtk.PopoverMenu.new_from_model(menu)
+        popover.set_parent(list_item.get_child())
+        popover.popup()
+
+    def _on_download_online_wallpaper_activated(self, action, param):
+        """Handles the 'Download' action from the online context menu."""
+        if not self.right_clicked_item: return
+        self._on_download_wallpaper_clicked(None, self.right_clicked_item)
+
+    def _on_show_online_properties_activated(self, action, param):
+        """Handles the 'Properties' action from the online context menu."""
+        if not self.right_clicked_item: return
+        item = self.right_clicked_item
+
+        dialog = Adw.MessageDialog.new(self.window, f"Properties for {item.wall_id}")
+        
+        content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
+        dialog.set_extra_child(content_box)
+
+        # Add the image preview
+        image_preview = Gtk.Picture(content_fit=Gtk.ContentFit.CONTAIN, hexpand=True, vexpand=False)
+        image_preview.set_size_request(400, 225) # Set a reasonable size for the preview
+        content_box.append(image_preview)
+
+        # Load the full image asynchronously
+        threading.Thread(target=self._load_full_online_image_thread, args=(item, image_preview), daemon=True).start()
+
+        page = Adw.PreferencesPage.new()
+        group = Adw.PreferencesGroup()
+        page.add(group)
+        content_box.append(page)
+
+        def add_property_row(title, subtitle):
+            row = Adw.ActionRow(title=title)
+            row.set_subtitle(str(subtitle))
+            group.add(row)
+
+        add_property_row("ID", item.wall_id)
+        add_property_row("Resolution", item.resolution)
+        add_property_row("Purity", item.purity)
+        add_property_row("URL", item.full_url)
+        
+        file_type = Path(item.full_url).suffix.lstrip('.')
+        if file_type:
+            add_property_row("File Type", file_type.upper())
+        
+        dialog.add_response("close", "Close")
+        dialog.set_default_response("close")
+        dialog.present()
+
+    def _load_full_online_image_thread(self, item, picture_widget):
+        """Loads the full online image in a background thread for the properties dialog."""
+        try:
+            print(f"Attempting to download full image from: {item.full_url}")
+            response = requests.get(item.full_url)
+            response.raise_for_status()
+            print(f"Full image downloaded successfully for {item.wall_id}")
+            
+            bytes = GLib.Bytes.new(response.content)
+            loader = GdkPixbuf.PixbufLoader.new()
+            loader.write(bytes.get_data())
+            loader.close()
+            pixbuf = loader.get_pixbuf()
+            print(f"Pixbuf created for full image {item.wall_id}")
+
+            texture = Gdk.Texture.new_for_pixbuf(pixbuf)
+            print(f"Texture created for full image {item.wall_id}")
+            
+            GLib.idle_add(picture_widget.set_paintable, texture)
+            print(f"Set paintable for full image {item.wall_id}")
+
+        except (requests.exceptions.RequestException, GLib.Error) as e:
+            print(f"Error loading full image for {item.wall_id}: {e}")
+
+    def _on_delete_online_wallpaper_activated(self, action, param):
+        """Handles the 'Delete' action for a downloaded online wallpaper."""
+        if not self.right_clicked_item: return
+        item = self.right_clicked_item
+
+        if not item.is_downloaded or not item.local_path:
+            self.toast_overlay.add_toast(Adw.Toast.new(f"'{item.wall_id}' is not downloaded."))
+            return
+
+        dialog = Adw.AlertDialog.new(f"Delete '{item.wall_id}'?")
+        dialog.set_body("This downloaded file will be permanently deleted. This action cannot be undone.")
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("delete", "Delete")
+        dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
+        dialog.connect("response", self._on_delete_online_dialog_response, item)
+        dialog.present(self.window)
+
+    def _on_delete_online_dialog_response(self, dialog, response, item):
+        """Handles the response from the delete confirmation dialog for online wallpapers."""
+        if response != "delete":
+            return
+
+        try:
+            Path(item.local_path).unlink()
+            self.toast_overlay.add_toast(Adw.Toast.new(f"'{item.wall_id}' deleted."))
+            item.is_downloaded = False
+            item.local_path = None
+            item.emit('download-status-changed', False, None)
+            self._load_wallpapers_async() # Refresh the live store to remove the item if it was there
+        except OSError as e:
+            self.toast_overlay.add_toast(Adw.Toast.new(f"Error deleting file: {e}"))
 
     def _update_recode_ui(self):
         """Updates the spinner and popover based on the recode queue and download tasks."""
@@ -1831,12 +1964,13 @@ class Manpaper(Adw.Application):
         name = item.title or (item.path if is_url else item.path.name)
 
         dialog = Adw.MessageDialog.new(self.window, f"Properties for {name}")
+        
+        content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
+        dialog.set_extra_child(content_box)
         page = Adw.PreferencesPage.new()
         group = Adw.PreferencesGroup()
         page.add(group)
-        dialog.set_extra_child(page)
-
-        title_entry = None
+        content_box.append(page)
 
         def add_property_row(title, subtitle):
             row = Adw.ActionRow(title=title)
@@ -1864,17 +1998,17 @@ class Manpaper(Adw.Application):
         if not is_static and not is_url:
             self._populate_media_properties(group, item)
 
-        dialog.add_response("close", "Close")
-        dialog.set_default_response("close")
+            dialog.add_response("close", "Close")
+            dialog.set_default_response("close")
 
-        def on_response(d, response_id):
-            if title_entry:
-                new_title = title_entry.get_text().strip()
-                if new_title and new_title != item.title:
-                    self._update_url_title(item, new_title)
-        
-        dialog.connect("response", on_response)
-        dialog.present()
+            def on_response(d, response_id):
+                if title_entry:
+                    new_title = title_entry.get_text().strip()
+                    if new_title and new_title != item.title:
+                        self._update_url_title(item, new_title)
+            
+            dialog.connect("response", on_response)
+            dialog.present()
 
     def _wallpaper_filter_func(self, item):
         """Filter function for static wallpapers."""
