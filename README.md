@@ -4,6 +4,8 @@
 
 # Manpaper
 
+![Preview](/.img/preview-with_css.png "Preview")
+
 Manpaper is a GTK4 wallpaper manager for wlroots-based compositors written in Python. It provides a user-friendly interface to browse local wallpapers, search and download online wallpapers and apply them using various backend tools. Support for both Live Wallpapers and Static Wallpapers
 
 ## Disclaimer
@@ -21,6 +23,17 @@ Manpaper is a GTK4 wallpaper manager for wlroots-based compositors written in Py
 *   **Custom CSS**: for nerds out there
 
 ## How it looks
+
+**Static Wallpapers view**
+![Static](.img/static-default.png "Static")
+**Live Wallpapers view**
+![Live](/.img/live-default.png "Live")
+**Online Wallpapers view**
+![Online](/.img/online-default.png "Online")
+**Config view**
+![Config](/.img/config-default.png "Config")
+**Config view (with Custom CSS file applied)**
+![Config](/.img/config-with_css.png "Config with CSS")
 
 ## Technologies
 
