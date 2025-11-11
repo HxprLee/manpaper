@@ -6,7 +6,7 @@
 
 ![Preview](/.img/preview-with_css.png "Preview")
 
-Manpaper is a GTK4 wallpaper manager for wlroots-based compositors (preferably [Hyprland :)](https://github.com/hyprwm/Hyprland)) written in Python. It provides a clean interface to browse local wallpapers, search and download online wallpapers and apply them using backends like `swww`, `swaybg`, `mpvpaper`. Support for both Live Wallpapers and Static Wallpapers
+Manpaper is a GTK4/Adw wallpaper manager for wlroots-based compositors (preferably [Hyprland :)](https://github.com/hyprwm/Hyprland)) written in Python. It provides a clean interface to browse local wallpapers, search and download online wallpapers and apply them using backends like `swww`, `swaybg`, `mpvpaper`. Support for both Live Wallpapers and Static Wallpapers
 
 ## Disclaimer
 
@@ -16,7 +16,7 @@ Manpaper is a GTK4 wallpaper manager for wlroots-based compositors (preferably [
 
 *   **Wallpaper Management:** Manages both static and live wallpapers.
 *   **Online Wallpaper Search:** Integrates with Wallhaven.cc to search, preview, and download online wallpapers.
-*   **Wallpaper Setting:** Sets wallpapers using various backends (swaybg, swww, hyprpaper for static; swww, mpvpaper for live).
+*   **Wallpaper Setting:** Sets wallpapers using backends like `swaybg`, `swww`, `mpvpaper`.
 *   **User Interface:** Built with GTK4 and Adwaita, providing a modern looking UI.
 *   **Zen Mode:** Hides UI elements for an immersive wallpaper browsing experience.
 *   **Keyboard Shortcuts:** Supports keyboard shortcuts for navigation and actions.
@@ -35,13 +35,10 @@ Manpaper is a GTK4 wallpaper manager for wlroots-based compositors (preferably [
 **Config view (with Custom CSS file applied)**
 ![Config](/.img/config-with_css.png "Config with CSS")
 
-## Technologies
-
-*   Python-GObject
-*   GTK4, libadwaita
-
 ## Dependencies
 
+* **python**: duh
+* **python-gobject**: GObject python library
 * **swaybg**: Static Wallpaper backend (Optional)
 * **swww**: Static/Live Wallpaper backend
 * **mpvpaper**: Static/Live Wallpaper backend
