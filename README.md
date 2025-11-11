@@ -6,7 +6,7 @@
 
 ![Preview](/.img/preview-with_css.png "Preview")
 
-Manpaper is a GTK4 wallpaper manager for wlroots-based compositors (preferably [Hyprland :)](https://github.com/hyprwm/Hyprland)) written in Python. It provides a clean interface to browse local wallpapers, search and download online wallpapers and apply them using various backend tools. Support for both Live Wallpapers and Static Wallpapers
+Manpaper is a GTK4 wallpaper manager for wlroots-based compositors (preferably [Hyprland :)](https://github.com/hyprwm/Hyprland)) written in Python. It provides a clean interface to browse local wallpapers, search and download online wallpapers and apply them using backends like `swww`, `swaybg`, `mpvpaper`. Support for both Live Wallpapers and Static Wallpapers
 
 ## Disclaimer
 
