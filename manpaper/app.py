@@ -23,6 +23,12 @@ from .config import SUPPORTED_STATIC, SUPPORTED_LIVE
 from .data_models import RecodeQueueItem, WallpaperItem, OnlineWallpaperItem, DownloadQueueItem
 from .online import search_wallhaven
 from .ui.preferences import PreferencesWindow
+from .ui.window import MainWindow
+from .ui.dialogs import (
+    create_confirmation_dialog, create_url_input_dialog,
+    create_properties_dialog, create_online_properties_dialog,
+    create_about_dialog, create_shortcuts_window
+)
 from .utils import (
     is_backend_installed, get_monitor_refresh_rate, get_monitor_resolution, 
     get_monitor_aspect_ratio, kill_backend_processes, build_command
@@ -37,7 +43,7 @@ class Manpaper(Adw.Application):
         Adw.init()
         self.settings = Gio.Settings.new('io.hxprlee.Manpaper')
         self.window = None
-        self.toast_overlay = None
+
         self.search_text = ""
         self.online_search_text = ""
         self.online_current_page = 1
@@ -60,12 +66,7 @@ class Manpaper(Adw.Application):
         # self.online_model = Gtk.SingleSelection.new(Gtk.FilterListModel.new(self.online_store, self.online_filter))
         self.online_model = Gtk.SingleSelection.new(self.online_store)
 
-        self.static_view = None
-        self.live_view = None
-        self.online_view = None
-        self.view_stack = None
-        self.random_button = None
-        self.add_button_revealer = None
+
         self.spinner = Gtk.Spinner(halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER, spinning=False, visible=False)
         
         self.recode_queue = []
@@ -76,9 +77,7 @@ class Manpaper(Adw.Application):
         # self.active_downloads = {} # Remove this
 
         self.download_popover_store = Gio.ListStore.new(DownloadQueueItem)
-        self.download_button = None
-        self.download_spinner = None
-        self.download_revealer_container = None
+
 
         # --- Threading and Caching Attributes ---
         self.thumbnail_lock = threading.Lock()
@@ -120,20 +119,7 @@ class Manpaper(Adw.Application):
         Gtk.StyleContext.add_provider_for_display(display, self.corner_radius_css_provider, Gtk.STYLE_PROVIDER_PRIORITY_USER)
         self._update_corner_radius_css()
         
-        self.search_button = None
-        self.search_button_revealer = None
-        self.search_entry = None
-        self.title_stack = None
-        self.bottom_bar_container = None
-        self.fade_revealer = None
-        self.slide_revealer = None
-        self.menu_popover = None
-        self.header_revealer = None
-        self.recode_button = None
-        self.recode_spinner = None
-        self.recode_revealer_container = None
-        self.purity_revealer = None
-        self.filter_button_revealer = None
+
 
         self.zen_mode_active = False
         self.original_show_labels = self.show_labels
@@ -145,10 +131,10 @@ class Manpaper(Adw.Application):
 
     def do_activate(self):
         if not self.window:
-            self.window = self._create_window()
+            self.window = MainWindow(self)
 
         self._check_and_set_default_backends()
-        self.view_stack.connect('notify::visible-child-name', self._on_view_changed)
+        self.window.view_stack.connect('notify::visible-child-name', self._on_view_changed)
         self._load_wallpapers_async()
         self._setup_actions()
         self._setup_key_controller()
@@ -160,14 +146,40 @@ class Manpaper(Adw.Application):
         # The mpvpaper process is no longer terminated here to allow it to persist.
         pass
 
+    def run_in_background(self, target_func, callback_func, *args, **kwargs):
+        """Helper to run a function in a background thread using GTask."""
+        task = Gio.Task.new(self, None, callback_func, None)
+        
+        # We need to capture args and kwargs to pass to the target function
+        task.target_func = target_func
+        task.args = args
+        task.kwargs = kwargs
+
+        def worker_func(task, source_object, task_data, cancellable):
+            try:
+                # Execute the blocking function
+                result = task.target_func(*task.args, **task.kwargs)
+                
+                # We can't easily pass arbitrary Python objects through return_value 
+                # if they aren't GObjects. So we attach the result to the task object itself.
+                task.python_result = result
+                task.python_error = None
+                task.return_boolean(True)
+            except Exception as e:
+                task.python_result = None
+                task.python_error = e
+                task.return_boolean(False)
+                
+        task.run_in_thread(worker_func)
+
     def send_mpv_command(self, command):
         """Sends a JSON IPC command to the mpv socket using socat."""
         if not self.mpv_socket_path:
             return
         
         if not is_backend_installed('socat'):
-            if self.toast_overlay:
-                GLib.idle_add(self.toast_overlay.add_toast, Adw.Toast.new("socat is not installed. IPC commands cannot be sent."))
+            if self.window.toast_overlay:
+                GLib.idle_add(self.window.toast_overlay.add_toast, Adw.Toast.new("socat is not installed. IPC commands cannot be sent."))
             return
 
         try:
@@ -180,297 +192,43 @@ class Manpaper(Adw.Application):
         except Exception as e:
             print(f"Failed to send command to mpv socket: {e}")
 
-    def _create_window(self):
-        """Creates the main application window and its widgets."""
-        win = Adw.ApplicationWindow(application=self, title='Manpaper', default_width=800, default_height=600)
-        win.set_size_request(628, 400)
-        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.PREFER_LIGHT)
 
-        self.view_stack = Adw.ViewStack(enable_transitions=True, transition_duration=300)
-        self.title_stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.SLIDE_UP_DOWN, transition_duration=300)
-
-        content = Adw.ToolbarView()
-        content.add_css_class("main-content")
-
-        header = Adw.HeaderBar(title_widget=self.title_stack)
-        self.header_revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_DOWN, transition_duration=250, reveal_child=True)
-        self.header_revealer.set_child(header)
-        content.add_top_bar(self.header_revealer)
-
-        self.search_entry = Gtk.SearchEntry(placeholder_text="Search wallpapers...")
-        self.search_entry.connect("search-changed", self._on_search_changed)
-        self.search_entry.connect("activate", self._on_search_activated)
-
-        view_switcher = Adw.ViewSwitcher(stack=self.view_stack, policy=Adw.ViewSwitcherPolicy.WIDE)
-        self.title_stack.add_named(view_switcher, "switcher")
-        self.title_stack.add_named(self.search_entry, "search")
-
-        self.search_button = Gtk.ToggleButton(icon_name="system-search-symbolic", tooltip_text="Search")
-        self.search_button.connect("toggled", self._on_search_toggled)
-        
-        self.search_button_revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.CROSSFADE, transition_duration=300)
-        self.search_button_revealer.set_child(self.search_button)
-        self.search_button_revealer.set_reveal_child(True)
-        header.pack_start(self.search_button_revealer)
-
-        self.recode_spinner = Adw.Spinner()
-        self.recode_button = Gtk.MenuButton(child=self.recode_spinner, tooltip_text="recoding progress")
-        
-        recode_revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_LEFT, transition_duration=300, reveal_child=False)
-        recode_revealer.set_child(self.recode_button)
-        
-        self.recode_revealer_container = Gtk.Box()
-        self.recode_revealer_container.append(recode_revealer)
-        self.recode_revealer_container.set_visible(False)
-        
-        recode_popover = Gtk.Popover()
-        self.recode_button.set_popover(recode_popover)
-        
-        scrolled_list_maxh = 300
-
-        popover_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        popover_vbox.set_size_request(350, scrolled_list_maxh)
-        recode_popover.set_child(popover_vbox)
-
-        popover_list_view = Gtk.ListView.new(Gtk.SingleSelection.new(self.recode_popover_store), self._recode_popover_factory())
-        popover_list_view.add_css_class("recode-popover-list")
-
-        scrolled_list = Gtk.ScrolledWindow(child=popover_list_view, vexpand=True, max_content_height=scrolled_list_maxh, hscrollbar_policy=Gtk.PolicyType.NEVER)
-        popover_vbox.append(scrolled_list)
-        scrolled_list.add_css_class("scrolled-list")
-
-        stop_all_button = Gtk.Button(label="Stop All", margin_top=6, margin_bottom=6, margin_start=6, margin_end=6)
-        stop_all_button.add_css_class("destructive-action")
-        stop_all_button.connect('clicked', self._on_stop_all_recodes_clicked)
-        popover_vbox.append(stop_all_button)
-        
-        header.pack_end(self.recode_revealer_container)
-
-        self.download_spinner = Adw.Spinner()
-        self.download_button = Gtk.MenuButton(child=self.download_spinner, tooltip_text="download progress")
-        
-        download_revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_LEFT, transition_duration=300, reveal_child=False)
-        download_revealer.set_child(self.download_button)
-        
-        self.download_revealer_container = Gtk.Box()
-        self.download_revealer_container.append(download_revealer)
-        self.download_revealer_container.set_visible(False)
-        
-        download_popover = Gtk.Popover()
-        self.download_button.set_popover(download_popover)
-        
-        download_popover_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        download_popover_vbox.set_size_request(350, scrolled_list_maxh)
-        download_popover.set_child(download_popover_vbox)
-
-        download_popover_list_view = Gtk.ListView.new(Gtk.SingleSelection.new(self.download_popover_store), self._download_popover_factory())
-        download_popover_list_view.add_css_class("download-popover-list")
-
-        download_scrolled_list = Gtk.ScrolledWindow(child=download_popover_list_view, vexpand=True, max_content_height=scrolled_list_maxh, hscrollbar_policy=Gtk.PolicyType.NEVER)
-        download_popover_vbox.append(download_scrolled_list)
-        download_scrolled_list.add_css_class("scrolled-list")
-
-        stop_all_downloads_button = Gtk.Button(label="Stop All", margin_top=6, margin_bottom=6, margin_start=6, margin_end=6)
-        stop_all_downloads_button.add_css_class("destructive-action")
-        stop_all_downloads_button.connect('clicked', self._on_stop_all_downloads_clicked)
-        download_popover_vbox.append(stop_all_downloads_button)
-        
-        header.pack_end(self.download_revealer_container)
-
-        menu_button = Gtk.MenuButton(icon_name="open-menu-symbolic", tooltip_text="Menu")
-        self.menu_popover = Gtk.PopoverMenu()
-        menu_button.set_popover(self.menu_popover)
-        header.pack_end(menu_button)
-
-        self.static_view = self._create_grid_view(self.static_model)
-        static_page = self.view_stack.add_titled(self._create_scrolled_window(self.static_view), 'static', 'Static')
-        static_page.set_icon_name('image-x-generic-symbolic')
-
-        self.live_view = self._create_grid_view(self.live_model)
-        live_page = self.view_stack.add_titled(self._create_scrolled_window(self.live_view), 'live', 'Live')
-        live_page.set_icon_name('video-x-generic-symbolic')
-
-        online_page_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-
-        # Create a container for the filter toggles
-        online_filters_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, halign=Gtk.Align.CENTER)
-
-        # Purity toggles
-        purity_label = Gtk.Label(label="Purity", halign=Gtk.Align.START, margin_start=6)
-        online_filters_box.append(purity_label)
-        purity_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        purity_box.add_css_class("linked")
-        self.sfw_switch = Gtk.ToggleButton(label="SFW")
-        self.sketchy_switch = Gtk.ToggleButton(label="Sketchy")
-        self.nsfw_switch = Gtk.ToggleButton(label="NSFW")
-
-        purity_box.append(self.sfw_switch)
-        purity_box.append(self.sketchy_switch)
-        purity_box.append(self.nsfw_switch)
-        online_filters_box.append(purity_box)
-
-        # Category toggles
-        category_label = Gtk.Label(label="Categories", halign=Gtk.Align.START, margin_start=6)
-        online_filters_box.append(category_label)
-        category_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        category_box.add_css_class("linked")
-        self.general_switch = Gtk.ToggleButton(label="General")
-        self.anime_switch = Gtk.ToggleButton(label="Anime")
-        self.people_switch = Gtk.ToggleButton(label="People")
-
-        category_box.append(self.general_switch)
-        category_box.append(self.anime_switch)
-        category_box.append(self.people_switch)
-        online_filters_box.append(category_box)
-
-        # Resolution filter
-        row_resolution = Adw.EntryRow(title="Resolution")
-        print(f"Type of row_resolution.get_child(): {type(row_resolution.get_child())}")
-        if hasattr(row_resolution.get_child(), 'get_children'):
-            for i, child in enumerate(row_resolution.get_child().get_children()):
-                print(f"  Child {i} of row_resolution.get_child(): {type(child)}")
-        row_resolution.set_text(self.settings.get_string('wallhaven-resolution'))
-        row_resolution.connect('changed', self._on_resolution_changed)
-        online_filters_box.append(row_resolution)
-
-        # Atleast (minimum resolution) filter
-        row_atleast = Adw.EntryRow(title="Minimum Resolution")
-        row_atleast.set_text(self.settings.get_string('wallhaven-atleast'))
-        row_atleast.connect('changed', self._on_atleast_changed)
-        online_filters_box.append(row_atleast)
-
-        # Aspect Ratio filter
-        row_ratio = Adw.EntryRow(title="Aspect Ratio")
-        row_ratio.set_text(self.settings.get_string('wallhaven-ratios'))
-        row_ratio.connect('changed', self._on_ratio_changed)
-        online_filters_box.append(row_ratio)
-
-        self.sfw_switch.set_active(self.settings.get_boolean('wallhaven-purity-sfw'))
-        self.sketchy_switch.set_active(self.settings.get_boolean('wallhaven-purity-sketchy'))
-        self.nsfw_switch.set_active(self.settings.get_boolean('wallhaven-purity-nsfw'))
-        self.general_switch.set_active(self.settings.get_boolean('wallhaven-category-general'))
-        self.anime_switch.set_active(self.settings.get_boolean('wallhaven-category-anime'))
-        self.people_switch.set_active(self.settings.get_boolean('wallhaven-category-people'))
-
-        self.sfw_switch.connect("toggled", self._on_purity_toggled, "sfw")
-        self.sketchy_switch.connect("toggled", self._on_purity_toggled, "sketchy")
-        self.nsfw_switch.connect("toggled", self._on_purity_toggled, "nsfw")
-        self.general_switch.connect("toggled", self._on_category_toggled, "general")
-        self.anime_switch.connect("toggled", self._on_category_toggled, "anime")
-        self.people_switch.connect("toggled", self._on_category_toggled, "people")
-
-        self.online_view = self._create_grid_view(self.online_model, self._online_item_factory())
-        scrolled_online_view = self._create_scrolled_window(self.online_view)
-        scrolled_online_view.set_vexpand(True)
-        online_page_box.append(scrolled_online_view)
-
-        self.load_more_button = Gtk.Button(label="Load More")
-        self.load_more_button.add_css_class("pill")
-        self.load_more_button.add_css_class("suggested-action")
-        self.load_more_button.set_halign(Gtk.Align.CENTER)
-        online_page = self.view_stack.add_titled(online_page_box, 'online', 'Online')
-        online_page.set_icon_name('globe-symbolic')
-
-        self.load_more_button = Gtk.Button(label="Load More")
-        self.load_more_button.add_css_class("pill")
-        self.load_more_button.add_css_class("suggested-action")
-        self.load_more_button.connect("clicked", self._on_load_more_online_wallpapers_clicked)
-
-        self.load_more_button_revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_UP, transition_duration=300, reveal_child=False, halign=Gtk.Align.CENTER, valign=Gtk.Align.END, margin_bottom=24)
-        self.load_more_button_revealer.set_child(self.load_more_button)
-        self.load_more_button_revealer.add_css_class("pill-revealer")
-
-                
-        prefs_view = self.prefs_window.create_preferences_view()
-        prefs_page = self.view_stack.add_titled(prefs_view, 'preferences', 'Config')
-        prefs_page.set_icon_name('preferences-system-symbolic')
-
-        view_switcher_bar = Adw.ViewSwitcherBar(stack=self.view_stack)
-        self.slide_revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_UP, transition_duration=250)
-        self.slide_revealer.set_child(view_switcher_bar)
-        
-        self.bottom_bar_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.bottom_bar_container.append(self.slide_revealer)
-
-        self.fade_revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.CROSSFADE, transition_duration=500)
-        self.fade_revealer.set_child(self.bottom_bar_container)
-        content.add_bottom_bar(self.fade_revealer)
-
-        self.random_button = Gtk.Button(tooltip_text="Set a random wallpaper from the current view")
-        self.random_button.connect('clicked', self._on_random_button_clicked)
-        button_content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        button_content.append(Gtk.Image.new_from_icon_name("view-refresh-symbolic"))
-        button_content.append(Gtk.Label(label="Random"))
-        self.random_button.set_child(button_content)
-        self.random_button.add_css_class("pill")
-        self.random_button.add_css_class("suggested-action")
-        
-        random_button_revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_LEFT, transition_duration=300, reveal_child=True, halign=Gtk.Align.END, valign=Gtk.Align.END, margin_bottom=24, margin_end=24)
-        random_button_revealer.set_child(self.random_button)
-        random_button_revealer.add_css_class("pill-revealer")
-        
-        self.filter_button = Gtk.MenuButton(icon_name="view-filter-symbolic", tooltip_text="Filter online wallpapers")
-        self.filter_button.add_css_class("pill")
-        self.filter_button.add_css_class("opaque")
-
-        filter_popover = Gtk.Popover()
-        filter_popover.set_child(online_filters_box)
-        self.filter_button.set_popover(filter_popover)
-
-        self.filter_button_revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_RIGHT, transition_duration=300, reveal_child=False, halign=Gtk.Align.START, valign=Gtk.Align.END, margin_bottom=24, margin_start=24)
-        self.filter_button_revealer.set_child(self.filter_button)
-        self.filter_button_revealer.add_css_class("pill-revealer")
-
-        add_button = Gtk.MenuButton(icon_name="list-add-symbolic", tooltip_text="Add source")
-        add_button.add_css_class("pill")
-        add_button.add_css_class("opaque")
-
-        add_menu = Gio.Menu()
-        add_menu.append("Add from URL", "app.add_url")
-        add_menu.append("Add local file", "app.add_local")
-        
-        addbtn_popover = Gtk.PopoverMenu()
-        addbtn_popover.set_menu_model(add_menu)
-        add_button.set_popover(addbtn_popover)
-
-        self.add_button_revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_RIGHT, transition_duration=300, reveal_child=False, halign=Gtk.Align.START, valign=Gtk.Align.END, margin_bottom=24, margin_start=24)
-        self.add_button_revealer.set_child(add_button)
-        self.add_button_revealer.add_css_class("pill-revealer")
-
-        self.status_page = Adw.StatusPage(icon_name="system-search-symbolic", title="No Results Found", description="Try a different search.", visible=False)
-
-        overlay = Gtk.Overlay(vexpand=True)
-        overlay.set_child(self.view_stack)
-        overlay.add_overlay(self.spinner)
-        overlay.add_overlay(self.status_page)
-        overlay.add_overlay(random_button_revealer)
-        overlay.add_overlay(self.add_button_revealer)
-        overlay.add_overlay(self.filter_button_revealer) # Add the new filter button revealer
-        overlay.add_overlay(self.load_more_button_revealer)
-        content.set_content(overlay)
-        
-        self.toast_overlay = Adw.ToastOverlay(child=content)
-        win.set_content(self.toast_overlay)
-        return win
 
     def _update_url_title(self, item, new_title):
-        """Updates the title for a URL-based wallpaper."""
-        if not isinstance(item.path, str) or item.title == new_title:
-            return
-
+        """Updates the title of a URL-based wallpaper."""
+        print(f"DEBUG: _update_url_title called with new_title='{new_title}', old_title='{item.title}'")
+        
         try:
+            # Load existing bookmarks
             bookmarks_str = self.settings.get_string('video-bookmarks')
             bookmarks = json.loads(bookmarks_str)
         except (json.JSONDecodeError, TypeError):
             bookmarks = []
-
+        
+        # Find and update the bookmark
         for bookmark in bookmarks:
             if bookmark.get('url') == item.path:
                 bookmark['title'] = new_title
+                print(f"DEBUG: Found and updated bookmark for {item.path}")
                 break
         
+        # Save updated bookmarks
         self.settings.set_string('video-bookmarks', json.dumps(bookmarks))
-        item.props.title = new_title # Update the live object property
+        
+        # Update the item's title directly (no need to reload entire list)
+        item.title = new_title
+        
+        # Notify the list model that the item changed
+        # This will update the UI without reloading everything
+        for i in range(self.live_store.get_n_items()):
+            if self.live_store.get_item(i) == item:
+                self.live_store.items_changed(i, 1, 1)
+                break
+        
+        # Show confirmation toast
+        self.window.toast_overlay.add_toast(Adw.Toast.new(f"Title updated to: {new_title}"))
+
+
 
     def _on_add_local_clicked(self, action, param):
         """Opens a file dialog to add local video files."""
@@ -498,12 +256,12 @@ class Manpaper(Adw.Application):
 
             wallpaper_dir_str = self.settings.get_string('wallpaper-dir')
             if not wallpaper_dir_str:
-                self.toast_overlay.add_toast(Adw.Toast.new("Wallpaper directory not set."))
+                self.window.toast_overlay.add_toast(Adw.Toast.new("Wallpaper directory not set."))
                 return
 
             wallpaper_dir = Path(wallpaper_dir_str)
             if not wallpaper_dir.is_dir():
-                self.toast_overlay.add_toast(Adw.Toast.new("Wallpaper directory not found."))
+                self.window.toast_overlay.add_toast(Adw.Toast.new("Wallpaper directory not found."))
                 return
 
             added_count = 0
@@ -515,48 +273,50 @@ class Manpaper(Adw.Application):
                         source_path.rename(destination_path)
                         added_count += 1
                 except Exception as e:
-                    self.toast_overlay.add_toast(Adw.Toast.new(f"Error moving file: {e}"))
+                    self.window.toast_overlay.add_toast(Adw.Toast.new(f"Error moving file: {e}"))
 
             if added_count > 0:
-                self.toast_overlay.add_toast(Adw.Toast.new(f"Added {added_count} new wallpaper(s)."))
+                self.window.toast_overlay.add_toast(Adw.Toast.new(f"Added {added_count} new wallpaper(s)."))
                 self._load_wallpapers_async()
 
         except GLib.Error as e:
             if not e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
-                self.toast_overlay.add_toast(Adw.Toast.new(f"Error selecting files: {e.message}"))
+                self.window.toast_overlay.add_toast(Adw.Toast.new(f"Error selecting files: {e.message}"))
 
     def _on_add_url_clicked(self, action, param):
-        dialog = Adw.MessageDialog.new(self.window, "Add Video URL")
-        dialog.add_css_class("rounded-dialog")
-        dialog.add_response("cancel", "Cancel")
-        dialog.add_response("add", "Add")
-        dialog.set_default_response("add")
-        dialog.set_response_appearance("add", Adw.ResponseAppearance.SUGGESTED)
+        dialog = create_url_input_dialog(self.window, self._on_add_url_dialog_response)
+        dialog.present(self.window)
 
-        content_area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        entry = Gtk.Entry(placeholder_text="https://...", hexpand=True)
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        box.append(Gtk.Label(label="URL"))
-        box.append(entry)
-        content_area.append(box)
-        dialog.set_extra_child(content_area)
-
-        dialog.connect("response", self._on_add_url_dialog_response)
-        dialog.present()
 
     def _on_add_url_dialog_response(self, dialog, response_id):
-        if response_id == "add":
-            content_area = dialog.get_extra_child()
-            box = content_area.get_first_child()
-            entry = box.get_last_child()
-            url = entry.get_text().strip()
+        if response_id == "add" or response_id == "download":
+            # Access the url_entry stored on the dialog object
+            url = dialog.url_entry.get_text().strip()
             if url:
-                if url.startswith("http://") or url.startswith("https://"):
-                    self._add_url_wallpaper(url)
+                # Validate that it's a valid YouTube URL
+                if 'youtube.com' in url or 'youtu.be' in url:
+                    if url.startswith("http://") or url.startswith("https://"):
+                        if response_id == "add":
+                            # Stream directly without downloading
+                            self._add_url_wallpaper_stream(url)
+                        else:  # download
+                            # Download the video
+                            self._download_youtube_video(url)
+                    else:
+                        self.window.toast_overlay.add_toast(Adw.Toast.new("URL must start with http:// or https://"))
                 else:
-                    self.toast_overlay.add_toast(Adw.Toast.new("Invalid URL format."))
+                    self.window.toast_overlay.add_toast(Adw.Toast.new("Only YouTube URLs are supported."))
 
-    def _add_url_wallpaper(self, url):
+
+
+
+    def _add_url_wallpaper_stream(self, url):
+        """Adds a YouTube URL for direct streaming (original behavior)."""
+        # Check if yt-dlp is installed
+        if not is_backend_installed('yt-dlp'):
+            self.window.toast_overlay.add_toast(Adw.Toast.new("yt-dlp is not installed. Please install it to use YouTube videos."))
+            return
+        
         try:
             bookmarks_str = self.settings.get_string('video-bookmarks')
             bookmarks = json.loads(bookmarks_str)
@@ -564,218 +324,148 @@ class Manpaper(Adw.Application):
             bookmarks = []
 
         if any(b.get('url') == url for b in bookmarks):
-            self.toast_overlay.add_toast(Adw.Toast.new("URL already exists."))
+            self.window.toast_overlay.add_toast(Adw.Toast.new("URL already exists."))
             return
         
-        new_bookmark = {"url": url, "title": url}
+        # Fetch video title using yt-dlp in background
+        self.window.toast_overlay.add_toast(Adw.Toast.new("Fetching video information..."))
+        
+        def fetch_title_worker(url_to_fetch):
+            # Get video info as JSON
+            command = ['yt-dlp', '--dump-json', '--no-download', url_to_fetch]
+            result = subprocess.run(command, capture_output=True, text=True, check=True)
+            
+            # Parse JSON response
+            video_info = json.loads(result.stdout)
+            title = video_info.get('title', url_to_fetch)
+            return url_to_fetch, title
+
+        def on_fetch_title_complete(source, result, data):
+            try:
+                success = result.propagate_boolean()
+                if success:
+                    url_res, title_res = result.python_result
+                    self._add_streaming_bookmark(url_res, title_res, bookmarks)
+                else:
+                    # Fallback to URL if yt-dlp fails (captured in worker exception)
+                    print(f"Fetch title failed: {result.python_error}")
+                    self._add_streaming_bookmark(url, url, bookmarks)
+            except Exception as e:
+                self.window.toast_overlay.add_toast(Adw.Toast.new(f"Error fetching title: {str(e)}"))
+                self._add_streaming_bookmark(url, url, bookmarks)
+
+        self.run_in_background(fetch_title_worker, on_fetch_title_complete, url)
+    
+    def _add_streaming_bookmark(self, url, title, bookmarks):
+        """Adds streaming bookmark with title to settings."""
+        new_bookmark = {"url": url, "title": title}
         bookmarks.append(new_bookmark)
         self.settings.set_string('video-bookmarks', json.dumps(bookmarks))
         
-        new_item = WallpaperItem(path=url, title=url)
+        new_item = WallpaperItem(path=url, title=title)
         self.live_store.append(new_item)
-        self.toast_overlay.add_toast(Adw.Toast.new(f"Added wallpaper from URL"))
+        self.window.toast_overlay.add_toast(Adw.Toast.new(f"Added: {title}"))
+        return False  # For GLib.idle_add
 
-    def _recode_popover_factory(self):
-        """Creates a factory for items in the Recode popover ListView."""
-        factory = Gtk.SignalListItemFactory()
 
-        def setup_cb(f, list_item):
-            row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, vexpand=True, spacing=8, margin_top=4, margin_bottom=4, margin_start=4, margin_end=4)
-            row_box.add_css_class("recode-item")
-            
-            label_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, margin_start=8, margin_end=8, margin_top=4, margin_bottom=4)
-            main_label = Gtk.Label(halign=Gtk.Align.START, ellipsize=Pango.EllipsizeMode.END)
-            status_label = Gtk.Label(halign=Gtk.Align.START)
-            status_label.add_css_class("caption")
-            label_box.append(main_label)
-            label_box.append(status_label)
-            row_box.append(label_box)
+    def _download_youtube_video(self, url):
+        """Downloads a YouTube video at the user's resolution."""
 
-            stop_button = Gtk.Button(icon_name="window-close-symbolic", valign=Gtk.Align.CENTER)
-            stop_button.add_css_class("circular")
-            stop_button.add_css_class("flat")
-            row_box.append(stop_button)
-            
-            list_item.set_child(row_box)
-
-        def bind_cb(f, list_item):
-            row_box = list_item.get_child()
-            label_box = row_box.get_first_child()
-            main_label = label_box.get_first_child()
-            status_label = label_box.get_last_child()
-            stop_button = row_box.get_last_child()
-            
-            queue_item = list_item.get_item()
-            if not queue_item: return
-
-            main_label.set_text(queue_item.text)
-            status_label.set_text(queue_item.status)
-            
-            if hasattr(stop_button, 'handler_id') and stop_button.handler_id > 0:
-                stop_button.disconnect(stop_button.handler_id)
-            stop_button.handler_id = stop_button.connect("clicked", self._on_stop_one_recode_clicked, queue_item.wallpaper_item)
-
-        factory.connect("setup", setup_cb)
-        factory.connect("bind", bind_cb)
-        return factory
-
-    def _download_popover_factory(self):
-        """Creates a factory for items in the Download popover ListView."""
-        factory = Gtk.SignalListItemFactory()
-
-        def setup_cb(f, list_item):
-            row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, vexpand=True, spacing=8, margin_top=4, margin_bottom=4, margin_start=4, margin_end=4)
-            row_box.add_css_class("download-item")
-            
-            label_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, margin_start=8, margin_end=8, margin_top=4, margin_bottom=4)
-            main_label = Gtk.Label(halign=Gtk.Align.START, ellipsize=Pango.EllipsizeMode.END)
-            status_label = Gtk.Label(halign=Gtk.Align.START)
-            status_label.add_css_class("caption")
-            label_box.append(main_label)
-            label_box.append(status_label)
-            row_box.append(label_box)
-
-            stop_button = Gtk.Button(icon_name="window-close-symbolic", valign=Gtk.Align.CENTER)
-            stop_button.add_css_class("circular")
-            stop_button.add_css_class("flat")
-            row_box.append(stop_button)
-            
-            list_item.set_child(row_box)
-
-        def bind_cb(f, list_item):
-            row_box = list_item.get_child()
-            label_box = row_box.get_first_child()
-            main_label = label_box.get_first_child()
-            status_label = label_box.get_last_child()
-            stop_button = row_box.get_last_child()
-            
-            queue_item = list_item.get_item()
-            if not queue_item: return
-
-            main_label.set_text(queue_item.text)
-            status_label.set_text(queue_item.status)
-            
-            if hasattr(stop_button, 'handler_id') and stop_button.handler_id > 0:
-                stop_button.disconnect(stop_button.handler_id)
-            stop_button.handler_id = stop_button.connect("clicked", self._on_stop_one_download_clicked, queue_item)
-
-        factory.connect("setup", setup_cb)
-        factory.connect("bind", bind_cb)
-        return factory
-
-    def _online_item_factory(self):
-        """Creates a factory for items in the Online GridView."""
-        factory = Gtk.SignalListItemFactory()
-        factory.connect("setup", self._on_online_factory_setup)
-        factory.connect("bind", self._on_online_factory_bind)
-        factory.connect("unbind", self._on_online_factory_unbind) # Added unbind
-        return factory
-
-    def _on_online_factory_setup(self, factory, list_item):
-        """Sets up a new online list item widget."""
-        revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_UP, transition_duration=300)
-        item_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        # Check if yt-dlp is installed
+        if not is_backend_installed('yt-dlp'):
+            self.window.toast_overlay.add_toast(Adw.Toast.new("yt-dlp is not installed. Please install it to use YouTube videos."))
+            return
         
-        list_item.picture = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, halign=Gtk.Align.CENTER)
-        list_item.download_button = Gtk.Button(icon_name="folder-download-symbolic", tooltip_text="Download Wallpaper")
-        list_item.download_button.add_css_class("circular")
-        # list_item.download_button.add_css_class("flat") # Removed flat style
-        list_item.download_button.add_css_class("drop-shadow") # Add a new class for drop shadow
-        list_item.download_button.set_halign(Gtk.Align.END)
-        list_item.download_button.set_valign(Gtk.Align.START)
-        list_item.download_button.set_margin_top(6)
-        list_item.download_button.set_margin_end(6)
+        # Check if URL already exists in bookmarks (already added for streaming)
+        try:
+            bookmarks_str = self.settings.get_string('video-bookmarks')
+            bookmarks = json.loads(bookmarks_str)
+        except (json.JSONDecodeError, TypeError):
+            bookmarks = []
 
-        list_item.resolution_label = Gtk.Label(halign=Gtk.Align.START, valign=Gtk.Align.END)
-        list_item.resolution_label.set_margin_top(6)
-        list_item.resolution_label.set_margin_bottom(6)
-        list_item.resolution_label.set_margin_start(6)
-        list_item.resolution_label.set_margin_end(6)
-        list_item.resolution_label.add_css_class("resolution-label")
-
-        picture_overlay = Gtk.Overlay()
-        picture_overlay.set_child(list_item.picture)
-        picture_overlay.add_overlay(list_item.download_button)
-        picture_overlay.add_overlay(list_item.resolution_label)
-
-        label = Gtk.Label(wrap=True, max_width_chars=20, ellipsize=Pango.EllipsizeMode.END, halign=Gtk.Align.CENTER)
+        if any(b.get('url') == url for b in bookmarks):
+            self.window.toast_overlay.add_toast(Adw.Toast.new("This URL is already added for streaming."))
+            return
         
-        # Create a revealer for the label
-        list_item.label_revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_DOWN, transition_duration=250)
-        list_item.label_revealer.set_child(label)
-
-        item_box.append(picture_overlay) # Append the overlay instead of the picture
-        item_box.append(list_item.label_revealer) # Append the revealer instead of the label
+        # Get user's monitor resolution
+        width, height = get_monitor_resolution(self.window)
+        if not width or not height:
+            self.window.toast_overlay.add_toast(Adw.Toast.new("Could not detect monitor resolution."))
+            return
         
-        revealer.set_child(item_box)
-        list_item.set_child(revealer)
+        # Show downloading toast
+        self.window.toast_overlay.add_toast(Adw.Toast.new(f"Downloading YouTube video at {width}x{height}..."))
         
-        # Add single-click activation
-        left_click_controller = Gtk.GestureClick.new()
-        left_click_controller.set_button(Gdk.BUTTON_PRIMARY)
-        left_click_controller.connect("pressed", self._on_list_item_activated, list_item)
-        revealer.add_controller(left_click_controller)
-
-        # Add context menu to each item's widget
-        right_click_controller = Gtk.GestureClick.new()
-        right_click_controller.set_button(Gdk.BUTTON_SECONDARY)
-        right_click_controller.connect("pressed", self._on_online_list_item_right_clicked, list_item)
-        revealer.add_controller(right_click_controller)
-
-    def _on_online_factory_bind(self, factory, list_item):
-        """Binds data to an online list item widget."""
-        item = list_item.get_item()
-        if not isinstance(item, OnlineWallpaperItem): return
-
-        list_item.resolution_label.set_text(item.resolution or "")
-
-        # Initialize download status and local path
-        local_path = self._get_online_wallpaper_local_path(item)
-        item.is_downloaded = bool(local_path)
-        item.local_path = str(local_path) if local_path else None
-
-        def on_size_changed(item_obj):
-            print(f"    on_size_changed (online) for {item.wall_id}: self.show_labels={self.show_labels}")
-            list_item.picture.set_size_request(self.preview_size, int(self.preview_size * self.aspect_ratio))
-            list_item.label_revealer.set_reveal_child(self.show_labels)
-            list_item.get_child().get_child().set_spacing(4 if self.show_labels else 0)
+        # Download the video in a background thread
+        wallpaper_dir_str = self.settings.get_string('wallpaper-dir')
+        if not wallpaper_dir_str:
+            self.window.toast_overlay.add_toast(Adw.Toast.new("Wallpaper directory not set."))
+            return
         
-        list_item.handler_id = item.connect('preview-size-changed', on_size_changed)
-        on_size_changed(item)
-        print(f"  _on_online_factory_bind for {item.wall_id}: self.show_labels={self.show_labels}")
-
-        list_item.label_revealer.get_child().set_text(item.title or item.wall_id) # Use title or wall_id for label
-
-        self._load_online_thumbnail(item, list_item.picture)
-
-        # Function to update the button's appearance and signal connection
-        def update_download_button_ui(item_obj, is_downloaded, local_path):
-            if is_downloaded:
-                list_item.download_button.set_icon_name("emblem-ok-symbolic")
-                list_item.download_button.set_tooltip_text("Apply Wallpaper")
-                # Disconnect previous handler if any
-                if hasattr(list_item.download_button, 'handler_id') and list_item.download_button.handler_id > 0:
-                    list_item.download_button.disconnect(list_item.download_button.handler_id)
-                list_item.download_button.handler_id = list_item.download_button.connect("clicked", self._on_apply_downloaded_wallpaper_clicked, item)
-            else:
-                list_item.download_button.set_icon_name("folder-download-symbolic")
-                list_item.download_button.set_tooltip_text("Download Wallpaper")
-                # Disconnect previous handler if any
-                if hasattr(list_item.download_button, 'handler_id') and list_item.download_button.handler_id > 0:
-                    list_item.download_button.disconnect(list_item.download_button.handler_id)
-                list_item.download_button.handler_id = list_item.download_button.connect("clicked", self._on_download_wallpaper_clicked, item)
-            list_item.download_button.set_sensitive(True) # Always sensitive, but action changes
-
-        # Initial UI update
-        update_download_button_ui(item, item.is_downloaded, item.local_path)
-
-        # Connect to download-status-changed signal for dynamic updates
-        if hasattr(list_item, 'download_status_handler_id') and list_item.download_status_handler_id > 0:
-            item.disconnect(list_item.download_status_handler_id)
-        list_item.download_status_handler_id = item.connect('download-status-changed', update_download_button_ui)
+        wallpaper_dir = Path(wallpaper_dir_str)
+        if not wallpaper_dir.is_dir():
+            self.window.toast_overlay.add_toast(Adw.Toast.new("Wallpaper directory not found."))
+            return
         
-        list_item.get_child().set_reveal_child(False)
-        GLib.timeout_add(list_item.get_position() * 40, lambda: (list_item.get_child().set_reveal_child(True), GLib.SOURCE_REMOVE)[1])
+        def download_worker(url_to_download, wallpaper_dir_path, max_height):
+            # Generate a filename from the video ID
+            video_id = url_to_download.split('v=')[-1].split('&')[0] if 'v=' in url_to_download else url_to_download.split('/')[-1]
+            video_id = video_id.split('?')[0]  # Remove query parameters
+            output_path = wallpaper_dir_path / f"yt_{video_id}.mp4"
+            
+            # First, get video info to extract title
+            info_command = ['yt-dlp', '--dump-json', '--no-download', url_to_download]
+            info_result = subprocess.run(info_command, capture_output=True, text=True, check=True)
+            video_info = json.loads(info_result.stdout)
+            title = video_info.get('title', f"yt_{video_id}")
+            
+            # Download with resolution constraint matching user's display
+            # Format: bestvideo[height<=HEIGHT]+bestaudio/best[height<=HEIGHT]
+            format_string = f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]"
+            
+            command = [
+                'yt-dlp',
+                '-f', format_string,
+                '--merge-output-format', 'mp4',
+                '-o', str(output_path),
+                url_to_download
+            ]
+            
+            subprocess.run(command, capture_output=True, text=True, check=True)
+            return output_path, title
+
+        def on_download_complete(source, result, data):
+            try:
+                success = result.propagate_boolean()
+                if success:
+                    path_res, title_res = result.python_result
+                    self._on_youtube_download_complete(path_res, title_res)
+                else:
+                    error_msg = f"Failed to download YouTube video: {result.python_error}"
+                    if isinstance(result.python_error, subprocess.CalledProcessError):
+                         error_msg = f"Failed to download YouTube video: {result.python_error.stderr[:100] if result.python_error.stderr else str(result.python_error)}"
+                    self.window.toast_overlay.add_toast(Adw.Toast.new(error_msg))
+            except Exception as e:
+                self.window.toast_overlay.add_toast(Adw.Toast.new(f"Error: {str(e)}"))
+
+        self.run_in_background(download_worker, on_download_complete, url, wallpaper_dir, height)
+    
+    def _on_youtube_download_complete(self, video_path, title):
+        """Called after YouTube video download completes."""
+        try:
+            # Add only the downloaded file to live wallpapers with the YouTube title
+            new_item = WallpaperItem(path=video_path, title=title)
+            self.live_store.append(new_item)
+            
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Downloaded: {title}"))
+            self._load_wallpapers_async()  # Refresh to show the new video
+        except Exception as e:
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Error adding video: {e}"))
+        
+        return False  # For GLib.idle_add
+
+
+
 
     def _get_online_wallpaper_local_path(self, item):
         """Determines the expected local path for a downloaded online wallpaper."""
@@ -787,17 +477,12 @@ class Manpaper(Adw.Application):
         file_path = Path(wallpaper_dir_str) / f"{item.wall_id}{file_extension}"
         return file_path if file_path.exists() else None
 
-    def _on_online_factory_unbind(self, factory, list_item):
-        """Unbinds data from an online list item widget."""
-        if hasattr(list_item, 'handler_id') and list_item.get_item():
-            list_item.get_item().disconnect(list_item.handler_id)
-
     def _on_download_wallpaper_clicked(self, button, item):
         """Handles the 'Download' button click for an online wallpaper."""
         print(f"Download button clicked for {item.wall_id}")
         wallpaper_dir_str = self.settings.get_string('wallpaper-dir')
         if not wallpaper_dir_str:
-            self.toast_overlay.add_toast(Adw.Toast.new("Wallpaper directory not set."))
+            self.window.toast_overlay.add_toast(Adw.Toast.new("Wallpaper directory not set."))
             return
 
         # Add to download popover store
@@ -805,8 +490,35 @@ class Manpaper(Adw.Application):
         self.download_popover_store.append(download_queue_item)
         self._update_download_ui() # Update the popover UI
 
-        thread = threading.Thread(target=self._download_wallpaper_thread, args=(item, wallpaper_dir_str, download_queue_item), daemon=True)
-        thread.start()
+        def download_worker(item_to_dl, wallpaper_dir_path):
+            print(f"Starting download for {item_to_dl.wall_id} from {item_to_dl.full_url}")
+            response = requests.get(item_to_dl.full_url, stream=True)
+            response.raise_for_status()
+            print(f"Successfully fetched content for {item_to_dl.wall_id}")
+
+            file_extension = Path(item_to_dl.full_url).suffix
+            file_path = Path(wallpaper_dir_path) / f"{item_to_dl.wall_id}{file_extension}"
+            print(f"Saving {item_to_dl.wall_id} to {file_path}")
+
+            with open(file_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            print(f"Download and save complete for {item_to_dl.wall_id}")
+            return item_to_dl, file_path
+
+        def on_download_complete(source, result, data):
+            try:
+                success = result.propagate_boolean()
+                if success:
+                    item_res, path_res = result.python_result
+                    self._on_download_finished(item_res, True, path_res, None, download_queue_item)
+                else:
+                    error_msg = str(result.python_error)
+                    self._on_download_finished(item, False, None, error_msg, download_queue_item)
+            except Exception as e:
+                self._on_download_finished(item, False, None, str(e), download_queue_item)
+
+        self.run_in_background(download_worker, on_download_complete, item, wallpaper_dir_str)
 
     def _on_apply_downloaded_wallpaper_clicked(self, button, item):
         """Handles the 'Apply' button click for a downloaded online wallpaper."""
@@ -815,32 +527,28 @@ class Manpaper(Adw.Application):
             wallpaper_item = WallpaperItem(Path(item.local_path), title=item.title)
             self._set_wallpaper(wallpaper_item)
         else:
-            self.toast_overlay.add_toast(Adw.Toast.new(f"Downloaded wallpaper not found: {item.title}"))
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Downloaded wallpaper not found: {item.title}"))
 
-    def _download_wallpaper_thread(self, item, wallpaper_dir, download_queue_item):
-        """Downloads a wallpaper in a background thread."""
-        try:
-            print(f"Starting download for {item.wall_id} from {item.full_url}")
-            response = requests.get(item.full_url, stream=True)
-            response.raise_for_status()
-            print(f"Successfully fetched content for {item.wall_id}")
+    def _on_delete_wallpaper_clicked(self, button, item):
+        """Handles the 'Delete' button click for a downloaded online wallpaper."""
+        print(f"Delete button clicked for {item.wall_id}")
+        if item.local_path and os.path.exists(item.local_path):
+            try:
+                os.remove(item.local_path)
+                item.is_downloaded = False
+                item.local_path = None
+                item.emit('download-status-changed', False, "")
+                self.window.toast_overlay.add_toast(Adw.Toast.new(f"Wallpaper {item.wall_id} deleted."))
+                self._load_wallpapers_async() # Reload to update UI
+            except OSError as e:
+                self.window.toast_overlay.add_toast(Adw.Toast.new(f"Error deleting wallpaper: {e}"))
+        else:
+            # It might be already deleted or path is wrong, just reset state
+            item.is_downloaded = False
+            item.local_path = None
+            item.emit('download-status-changed', False, "")
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Wallpaper file not found, status reset."))
 
-            file_extension = Path(item.full_url).suffix
-            file_path = Path(wallpaper_dir) / f"{item.wall_id}{file_extension}"
-            print(f"Saving {item.wall_id} to {file_path}")
-
-            with open(file_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            print(f"Download and save complete for {item.wall_id}")
-            
-            GLib.idle_add(self._on_download_finished, item, True, file_path, download_queue_item)
-        except requests.exceptions.RequestException as e:
-            print(f"Error downloading wallpaper: {e}")
-            GLib.idle_add(self._on_download_finished, item, False, None, str(e), download_queue_item)
-        except Exception as e:
-            print(f"An unexpected error occurred during download: {e}")
-            GLib.idle_add(self._on_download_finished, item, False, None, str(e), download_queue_item)
 
     def _on_download_finished(self, item, success, file_path=None, error_message=None, download_queue_item=None):
         """Callback after a wallpaper download is finished."""
@@ -854,62 +562,54 @@ class Manpaper(Adw.Application):
         self._update_download_ui() # Update the popover UI
 
         if success:
-            self.toast_overlay.add_toast(Adw.Toast.new(f"Wallpaper {item.wall_id} downloaded."))
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Wallpaper {item.wall_id} downloaded."))
             item.is_downloaded = True
             item.local_path = str(file_path)
             item.emit('download-status-changed', True, str(file_path))
             self._load_wallpapers_async() # Reload after callback to ensure UI is updated
         else:
-            self.toast_overlay.add_toast(Adw.Toast.new(f"Failed to download {item.wall_id}: {error_message}"))
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Failed to download {item.wall_id}: {error_message}"))
 
     def _load_online_thumbnail(self, item, picture):
         """Loads an online thumbnail in a background thread."""
-        thread = threading.Thread(target=self._load_online_thumbnail_thread, args=(item, picture), daemon=True)
-        thread.start()
-
-    def _load_online_thumbnail_thread(self, item, picture):
-        """Loads an online thumbnail in a background thread."""
-        try:
-            print(f"Attempting to download thumbnail from: {item.thumbnail_url}")
-            response = requests.get(item.thumbnail_url)
+        
+        def load_thumbnail_worker(item_to_load):
+            print(f"Attempting to download thumbnail from: {item_to_load.thumbnail_url}")
+            response = requests.get(item_to_load.thumbnail_url)
             response.raise_for_status()
-            print(f"Thumbnail downloaded successfully for {item.wall_id}")
+            print(f"Thumbnail downloaded successfully for {item_to_load.wall_id}")
             
-            # Create a pixbuf from the downloaded data
-            bytes = GLib.Bytes.new(response.content)
-            loader = GdkPixbuf.PixbufLoader.new()
-            loader.write(bytes.get_data())
-            loader.close()
-            pixbuf = loader.get_pixbuf()
-            print(f"Pixbuf created for {item.wall_id}")
+            # Return the raw bytes, create texture on main thread
+            return item_to_load, response.content
 
-            # Create a texture from the pixbuf
-            texture = Gdk.Texture.new_for_pixbuf(pixbuf)
-            print(f"Texture created for {item.wall_id}")
-            
-            GLib.idle_add(picture.set_paintable, texture)
-            print(f"Set paintable for {item.wall_id}")
+        def on_load_thumbnail_complete(source, result, data):
+            try:
+                success = result.propagate_boolean()
+                if success:
+                    item_res, content_bytes = result.python_result
+                    
+                    # Create a pixbuf from the downloaded data
+                    bytes_glib = GLib.Bytes.new(content_bytes)
+                    loader = GdkPixbuf.PixbufLoader.new()
+                    loader.write(bytes_glib.get_data())
+                    loader.close()
+                    pixbuf = loader.get_pixbuf()
+                    
+                    # Create a texture from the pixbuf
+                    texture = Gdk.Texture.new_for_pixbuf(pixbuf)
+                    picture.set_paintable(texture)
+                    print(f"Set paintable for {item_res.wall_id}")
+                else:
+                    print(f"Error loading thumbnail for {item.wall_id}: {result.python_error}")
+            except Exception as e:
+                print(f"Error processing thumbnail for {item.wall_id}: {e}")
 
-        except (requests.exceptions.RequestException, GLib.Error) as e:
-            print(f"Error loading thumbnail for {item.wall_id}: {e}")
+        self.run_in_background(load_thumbnail_worker, on_load_thumbnail_complete, item)
 
-    def _create_grid_view(self, model, factory=None):
-        """Helper to create a Gtk.GridView."""
-        if factory is None:
-            factory = self._item_factory()
-        view = Gtk.GridView.new(model, factory)
-        view.connect('activate', self._on_wallpaper_activated)
-        return view
+    # _load_online_thumbnail_thread removed as it is now inline
 
-    def _create_scrolled_window(self, child):
-        """Helper to create a Gtk.ScrolledWindow for a grid view."""
-        scrolled = Gtk.ScrolledWindow(margin_top=24, margin_bottom=24, margin_start=24, margin_end=24)
-        scrolled.set_child(child)
-        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroll_controller = Gtk.EventControllerScroll.new(Gtk.EventControllerScrollFlags.VERTICAL)
-        scroll_controller.connect("scroll", self._on_scroll_resize)
-        scrolled.add_controller(scroll_controller)
-        return scrolled
+
+
 
     def _setup_actions(self):
         """Sets up application actions and menu."""
@@ -917,7 +617,7 @@ class Manpaper(Adw.Application):
         menu_model.append("Zen Mode", "app.zen_mode")
         menu_model.append("Keyboard Shortcuts", "app.shortcuts")
         menu_model.append("About", "app.about")
-        self.menu_popover.set_menu_model(menu_model)
+        self.window.menu_popover.set_menu_model(menu_model)
 
         action_zen = Gio.SimpleAction(name="zen_mode")
         action_zen.connect("activate", self._on_zen_mode_toggled)
@@ -978,10 +678,10 @@ class Manpaper(Adw.Application):
 
         if installed_static and current_static not in installed_static:
             new_default = installed_static[0]
-            self.toast_overlay.add_toast(Adw.Toast.new(f"Static backend '{current_static}' not found. Defaulting to '{new_default}'."))
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Static backend '{current_static}' not found. Defaulting to '{new_default}'."))
             self.settings.set_string('static-backend', new_default)
         elif not installed_static:
-            self.toast_overlay.add_toast(Adw.Toast.new("Warning: No static wallpaper backends found."))
+            self.window.toast_overlay.add_toast(Adw.Toast.new("Warning: No static wallpaper backends found."))
 
         all_live = ['swww', 'mpvpaper']
         installed_live = [b for b in all_live if is_backend_installed(b)]
@@ -989,10 +689,10 @@ class Manpaper(Adw.Application):
 
         if installed_live and current_live not in installed_live:
             new_default = installed_live[0]
-            self.toast_overlay.add_toast(Adw.Toast.new(f"Live backend '{current_live}' not found. Defaulting to '{new_default}'."))
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Live backend '{current_live}' not found. Defaulting to '{new_default}'."))
             self.settings.set_string('live-backend', new_default)
         elif not installed_live:
-            self.toast_overlay.add_toast(Adw.Toast.new("Warning: No live wallpaper backends found."))
+            self.window.toast_overlay.add_toast(Adw.Toast.new("Warning: No live wallpaper backends found."))
 
     def _update_css(self):
         """Loads default and custom CSS."""
@@ -1024,7 +724,7 @@ class Manpaper(Adw.Application):
                 self.custom_css_provider.load_from_path(self.custom_css_path)
                 Gtk.StyleContext.add_provider_for_display(display, self.custom_css_provider, Gtk.STYLE_PROVIDER_PRIORITY_USER)
             except Exception as e:
-                self.toast_overlay.add_toast(Adw.Toast.new(f"Error loading custom CSS: {e}"))
+                self.window.toast_overlay.add_toast(Adw.Toast.new(f"Error loading custom CSS: {e}"))
 
     def _update_corner_radius_css(self):
         """Updates the CSS for wallpaper preview corner radius."""
@@ -1034,36 +734,36 @@ class Manpaper(Adw.Application):
     def _on_search_toggled(self, button):
         """Handles the toggling of the search button."""
         is_active = button.get_active()
-        self.search_button_revealer.set_reveal_child(not is_active)
-        self.title_stack.set_visible_child_name("search" if is_active else "switcher")
-        self.fade_revealer.set_reveal_child(False)
-        GLib.timeout_add(100, lambda: self.fade_revealer.set_reveal_child(True))
+        self.window.search_button_revealer.set_reveal_child(not is_active)
+        self.window.title_stack.set_visible_child_name("search" if is_active else "switcher")
+        self.window.fade_revealer.set_reveal_child(False)
+        GLib.timeout_add(100, lambda: self.window.fade_revealer.set_reveal_child(True))
         if is_active:
-            self.search_entry.grab_focus()
+            self.window.search_entry.grab_focus()
         else:
-            self.search_entry.set_text("")
+            self.window.search_entry.set_text("")
             self.window.set_focus(None)
         self._update_random_button_visibility()
 
     def _update_random_button_visibility(self):
         """Shows or hides the random button based on context."""
-        visible_child = self.view_stack.get_visible_child_name()
+        visible_child = self.window.view_stack.get_visible_child_name()
         is_prefs = visible_child == "preferences"
         is_online = visible_child == "online"
         is_searching = bool(self.search_text)
-        if self.random_button:
-            self.random_button.get_parent().set_reveal_child(not is_prefs and not is_online and not is_searching and not self.zen_mode_active)
+        if self.window.random_button:
+            self.window.random_button.get_parent().set_reveal_child(not is_prefs and not is_online and not is_searching and not self.zen_mode_active)
 
     def _update_add_url_button_visibility(self):
         """Shows or hides the Add URL button based on context."""
-        is_live_view = self.view_stack.get_visible_child_name() == "live"
-        if self.add_button_revealer:
-            self.add_button_revealer.set_reveal_child(is_live_view and not self.zen_mode_active)
+        is_live_view = self.window.view_stack.get_visible_child_name() == "live"
+        if self.window.add_button_revealer:
+            self.window.add_button_revealer.set_reveal_child(is_live_view and not self.zen_mode_active)
 
     def _hide_search_revealer_if_needed(self):
         """Callback to hide the search revealer if still in prefs."""
-        if self.view_stack.get_visible_child_name() == "preferences":
-            self.search_button_revealer.set_visible(False)
+        if self.window.view_stack.get_visible_child_name() == "preferences":
+            self.window.search_button_revealer.set_visible(False)
         return GLib.SOURCE_REMOVE
 
     def _on_view_changed(self, stack, _):
@@ -1073,41 +773,41 @@ class Manpaper(Adw.Application):
         is_prefs = stack.get_visible_child_name() == "preferences"
         is_online = stack.get_visible_child_name() == "online"
         # self.purity_revealer.set_reveal_child(is_online) # Removed, now controlled by filter button
-        self.filter_button_revealer.set_reveal_child(is_online) # Control new filter button
-        self.load_more_button_revealer.set_reveal_child(is_online) # Control load more button
+        self.window.filter_button_revealer.set_reveal_child(is_online) # Control new filter button
+        self.window.load_more_button_revealer.set_reveal_child(is_online) # Control load more button
         if is_online:
             self._trigger_online_search(latest=True)
 
         if is_prefs:
-            self.search_button_revealer.set_reveal_child(False)
+            self.window.search_button_revealer.set_reveal_child(False)
             GLib.timeout_add(300, self._hide_search_revealer_if_needed)
         else:
-            self.search_button_revealer.set_visible(True)
-            self.search_button_revealer.set_reveal_child(True)
+            self.window.search_button_revealer.set_visible(True)
+            self.window.search_button_revealer.set_reveal_child(True)
 
-        self.fade_revealer.set_reveal_child(False)
+        self.window.fade_revealer.set_reveal_child(False)
         GLib.timeout_add(100, lambda: (
-            self.slide_revealer.set_reveal_child(not is_prefs),
-            GLib.timeout_add(50, lambda: (self.fade_revealer.set_reveal_child(True), GLib.SOURCE_REMOVE)[1]),
+            self.window.slide_revealer.set_reveal_child(not is_prefs),
+            GLib.timeout_add(50, lambda: (self.window.fade_revealer.set_reveal_child(True), GLib.SOURCE_REMOVE)[1]),
             GLib.SOURCE_REMOVE
         )[2])
 
-        if is_prefs and self.search_button.get_active():
-            self.search_button.set_active(False)
+        if is_prefs and self.window.search_button.get_active():
+            self.window.search_button.set_active(False)
 
     def _on_zen_mode_toggled(self, *args):
         """Toggles Zen mode, hiding UI elements."""
-        if self.menu_popover.is_visible():
-            self.menu_popover.popdown()
+        if self.window.menu_popover.is_visible():
+            self.window.menu_popover.popdown()
         self.zen_mode_active = not self.zen_mode_active
 
         print(f"Zen Mode Toggled. zen_mode_active: {self.zen_mode_active}")
         print(f"  Initial self.show_labels: {self.show_labels}")
 
-        self.header_revealer.set_reveal_child(not self.zen_mode_active)
+        self.window.header_revealer.set_reveal_child(not self.zen_mode_active)
         self._update_random_button_visibility()
         self._update_add_url_button_visibility()
-        self.filter_button_revealer.set_reveal_child(not self.zen_mode_active) # Hide/show filter button
+        self.window.filter_button_revealer.set_reveal_child(not self.zen_mode_active) # Hide/show filter button
 
         # Directly manage self.show_labels and then emit the signal
         if self.zen_mode_active:
@@ -1126,144 +826,37 @@ class Manpaper(Adw.Application):
 
     def _on_shortcuts_clicked(self, *args):
         """Shows the shortcuts window."""
-        self.menu_popover.popdown()
-        shortcuts_window = Gtk.ShortcutsWindow(transient_for=self.window)
-        section = Gtk.ShortcutsSection()
-        
-        def add_shortcut(group, title, accelerator):
-            group.append(Gtk.ShortcutsShortcut(title=title, accelerator=accelerator))
-
-        general_group = Gtk.ShortcutsGroup(title="General")
-        add_shortcut(general_group, "Toggle Search Bar", "<Control>F")
-        section.append(general_group)
-
-        nav_group = Gtk.ShortcutsGroup(title="Navigation")
-        add_shortcut(nav_group, "Go to Static Wallpapers", "<Alt>1")
-        add_shortcut(nav_group, "Go to Live Wallpapers", "<Alt>2")
-        add_shortcut(nav_group, "Go to Online Wallpapers", "<Alt>3")
-        add_shortcut(nav_group, "Go to Preferences", "<Alt>4")
-        section.append(nav_group)
-
-        view_group = Gtk.ShortcutsGroup(title="View")
-        add_shortcut(view_group, "Preview Zoom In", "<Ctrl>ScrollUp")
-        add_shortcut(view_group, "Preview Zoom Out", "<Ctrl>ScrollDown")
-        section.append(view_group)
-
-        shortcuts_window.set_child(section)
+        self.window.menu_popover.popdown()
+        shortcuts_window = create_shortcuts_window(self.window)
         shortcuts_window.present()
+
 
     def _on_about_clicked(self, *args):
         """Shows the about dialog."""
-        self.menu_popover.popdown()
-        dialog = Adw.AboutDialog(
-            application_name="Manpaper",
-            application_icon="io.hxprlee.Manpaper",
-            version="0.1",
-            developers=["Gemini", "ChatGPT", "HxprLee"],
-            designers=["HxprLee"],
-            comments="A simple wallpaper frontend for wlroots-based compositors",
-            website="https://github.com/HxprLee/manpaper",
-            issue_url="https://github.com/HxprLee/manpaper/issues"
-        )
+        self.window.menu_popover.popdown()
+        dialog = create_about_dialog(self.window)
         dialog.present(self.window)
+
 
     def _on_key_pressed(self, controller, keyval, keycode, state):
         """Handles global key presses."""
-        if keyval == Gdk.KEY_Escape and self.search_button.get_active():
-            self.search_button.set_active(False)
+        if keyval == Gdk.KEY_Escape and self.window.search_button.get_active():
+            self.window.search_button.set_active(False)
             return True
             
         if state & Gdk.ModifierType.CONTROL_MASK and keyval == Gdk.KEY_f:
-            if self.view_stack.get_visible_child_name() != 'preferences':
-                self.search_button.set_active(not self.search_button.get_active())
+            if self.window.view_stack.get_visible_child_name() != 'preferences':
+                self.window.search_button.set_active(not self.window.search_button.get_active())
                 return True
         elif state & Gdk.ModifierType.ALT_MASK:
             key_map = {Gdk.KEY_1: 'static', Gdk.KEY_2: 'live', Gdk.KEY_3: 'online', Gdk.KEY_4: 'preferences'}
             if keyval in key_map:
-                self.view_stack.set_visible_child_name(key_map[keyval])
+                self.window.view_stack.set_visible_child_name(key_map[keyval])
                 return True
             elif keyval == Gdk.KEY_z:
                 self._on_zen_mode_toggled()
                 return True
         return False
-
-    def _item_factory(self):
-        """Creates a factory for items in the GridView."""
-        factory = Gtk.SignalListItemFactory()
-        factory.connect("setup", self._on_factory_setup)
-        factory.connect("bind", self._on_factory_bind)
-        factory.connect("unbind", self._on_factory_unbind)
-        return factory
-
-    def _on_factory_setup(self, factory, list_item):
-        """Sets up a new list item widget."""
-        revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_UP, transition_duration=300)
-        item_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        picture = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, halign=Gtk.Align.CENTER)
-        label = Gtk.Label(wrap=True, max_width_chars=20, ellipsize=Pango.EllipsizeMode.END, halign=Gtk.Align.CENTER)
-        
-        # Create a revealer for the label
-        label_revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_DOWN, transition_duration=250)
-        label_revealer.set_child(label)
-
-        item_box.append(picture)
-        item_box.append(label_revealer) # Append the revealer instead of the label
-        
-        revealer.set_child(item_box)
-        list_item.set_child(revealer)
-        
-        # Add single-click activation
-        left_click_controller = Gtk.GestureClick.new()
-        left_click_controller.set_button(Gdk.BUTTON_PRIMARY)
-        left_click_controller.connect("pressed", self._on_list_item_activated, list_item)
-        revealer.add_controller(left_click_controller)
-
-        # Add context menu to each item's widget
-        right_click_controller = Gtk.GestureClick.new()
-        right_click_controller.set_button(Gdk.BUTTON_SECONDARY)
-        right_click_controller.connect("pressed", self._on_list_item_right_clicked, list_item)
-        revealer.add_controller(right_click_controller)
-
-    def _on_factory_bind(self, factory, list_item):
-        """Binds data to a list item widget."""
-        revealer = list_item.get_child()
-        item_box = revealer.get_child()
-        picture = item_box.get_first_child()
-        label_revealer = item_box.get_last_child() # This is now the revealer
-        label = label_revealer.get_child() # Get the label from the revealer
-        item = list_item.get_item()
-
-        if not isinstance(item, WallpaperItem): return
-
-        def on_size_changed(item_obj):
-            print(f"    on_size_changed (static/live) for {item.path}: self.show_labels={self.show_labels}")
-            picture.set_size_request(self.preview_size, int(self.preview_size * self.aspect_ratio))
-            label_revealer.set_reveal_child(self.show_labels) # Animate the revealer
-            item_box.set_spacing(4 if self.show_labels else 0)
-        
-        list_item.handler_id = item.connect('preview-size-changed', on_size_changed)
-        on_size_changed(item)
-        print(f"  _on_factory_bind (static/live) for {item.path}: self.show_labels={self.show_labels}")
-
-        image_path = self._get_thumbnail_path_or_trigger_generation(item)
-        if image_path:
-            if image_path not in self.texture_cache:
-                target_w = self.preview_size
-                target_h = int(self.preview_size * self.aspect_ratio)
-                self.texture_cache[image_path] = self._create_cropped_texture(image_path, target_w, target_h)
-            picture.set_paintable(self.texture_cache.get(image_path))
-        else:
-            # If path is None, it means thumbnail is being generated. Clear the picture.
-            picture.set_paintable(None)
-
-        label.set_text(item.path if isinstance(item.path, str) else item.path.stem)
-        revealer.set_reveal_child(False)
-        GLib.timeout_add(list_item.get_position() * 40, lambda: (revealer.set_reveal_child(True), GLib.SOURCE_REMOVE)[1])
-
-    def _on_factory_unbind(self, factory, list_item):
-        """Unbinds data from a list item widget."""
-        if hasattr(list_item, 'handler_id') and list_item.get_item():
-            list_item.get_item().disconnect(list_item.handler_id)
 
     def _update_spinner(self):
         """Shows or hides the main spinner based on the background task counter."""
@@ -1487,23 +1080,65 @@ class Manpaper(Adw.Application):
                 self._set_wallpaper(item)
 
     def _set_wallpaper(self, item):
-        """Sets the system wallpaper using the configured backend."""
-        print(f"DEBUG: _set_wallpaper called for {item.path}")
-        if not isinstance(item, WallpaperItem): return
-
-        path = item.path
-        is_url = isinstance(path, str)
-        is_static = not is_url and path.suffix.lower() in SUPPORTED_STATIC
-        backend_key = 'static-backend' if is_static else 'live-backend'
-        backend = self.settings.get_string(backend_key)
-
-        if not backend:
-            backend_type = "static" if is_static else "live"
-            self.toast_overlay.add_toast(Adw.Toast.new(f"No {backend_type} backend configured or installed."))
+        """Sets the given item as the wallpaper."""
+        if not item:
             return
+        
+        path = item.path
+        print(f"DEBUG: _set_wallpaper called for {path}")
+        
+        is_url = isinstance(path, str) and (path.startswith('http://') or path.startswith('https://'))
+        
+        # Display name: use title if available, otherwise use filename/URL
+        display_name = item.title if item.title else (path if is_url else path.name)
+        
+        if is_url:
+            # URL-based wallpaper
+            self._set_url_wallpaper(path)
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Wallpaper set to: {display_name}"))
+        elif path.suffix.lower() in SUPPORTED_STATIC:
+            # Static wallpaper
+            self._set_static_wallpaper(path)
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Wallpaper set to: {display_name}"))
+        elif path.suffix.lower() in SUPPORTED_LIVE:
+            # Live wallpaper
+            self._set_live_wallpaper(path)
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Wallpaper set to: {display_name}"))
 
-        if backend == 'swww' and not is_static and (is_url or path.suffix.lower() != '.gif'):
-            self.toast_overlay.add_toast(Adw.Toast.new("Swww backend only supports .gif for live wallpapers."))
+    def _set_static_wallpaper(self, path):
+        """Sets a static wallpaper using the configured backend."""
+        backend = self.settings.get_string('static-backend')
+        
+        if not backend:
+            self.window.toast_overlay.add_toast(Adw.Toast.new("No static backend configured or installed."))
+            return
+        
+        # Kill any running backend processes (e.g., mpvpaper for live wallpapers)
+        kill_backend_processes()
+        self.mpv_process = None
+        
+        name = path.name
+        command = build_command(backend, path, self.settings)
+        
+        if not command:
+            return
+        
+        try:
+            subprocess.run(command, shell=True, check=True)
+        except subprocess.CalledProcessError as e:
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Error setting wallpaper: {e}"))
+
+
+    def _set_live_wallpaper(self, path):
+        """Sets a live wallpaper using the configured backend."""
+        backend = self.settings.get_string('live-backend')
+        
+        if not backend:
+            self.window.toast_overlay.add_toast(Adw.Toast.new("No live backend configured or installed."))
+            return
+        
+        if backend == 'swww' and path.suffix.lower() != '.gif':
+            self.window.toast_overlay.add_toast(Adw.Toast.new("Swww backend only supports .gif for live wallpapers."))
             return
         
         kill_backend_processes()
@@ -1526,15 +1161,45 @@ class Manpaper(Adw.Application):
                     if process.stderr:
                         for line in iter(process.stderr.readline, ''):
                             if line: print(f"[mpvpaper stderr] {line.strip()}")
-                        process.stderr.close()
+                    process.stderr.close()
                 threading.Thread(target=monitor_stderr, args=(self.mpv_process,), daemon=True).start()
                 
                 GLib.timeout_add(500, self._set_initial_mpv_state)
             else:
                 subprocess.Popen(cmd, shell=True)
+
+    def _set_url_wallpaper(self, url):
+        """Sets a URL-based wallpaper (YouTube video) using mpvpaper."""
+        backend = self.settings.get_string('live-backend')
+        
+        if backend != 'mpvpaper':
+            self.window.toast_overlay.add_toast(Adw.Toast.new("URL wallpapers require mpvpaper backend."))
+            return
+        
+        kill_backend_processes()
+        self.mpv_process = None
+        
+        # Build command for URL playback
+        cmd = build_command(backend, url, self.settings)
+        
+        if cmd:
+            resolved_socket_path = str(Path(self.mpv_socket_path).expanduser())
+            socket_file = Path(resolved_socket_path)
+            try:
+                if socket_file.exists(): socket_file.unlink()
+            except OSError as e:
+                print(f"Error removing old mpv socket: {e}")
             
-            name = path if is_url else path.name
-            self.toast_overlay.add_toast(Adw.Toast.new(f"Wallpaper set to: {name}"))
+            self.mpv_process = subprocess.Popen(cmd, shell=True, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True)
+            
+            def monitor_stderr(process):
+                if process.stderr:
+                    for line in iter(process.stderr.readline, ''):
+                        if line: print(f"[mpvpaper stderr] {line.strip()}")
+                    process.stderr.close()
+            threading.Thread(target=monitor_stderr, args=(self.mpv_process,), daemon=True).start()
+            
+            GLib.timeout_add(500, self._set_initial_mpv_state)
 
     def _set_initial_mpv_state(self):
         """Sends initial volume and mute commands to a new mpvpaper instance."""
@@ -1544,14 +1209,14 @@ class Manpaper(Adw.Application):
 
     def _on_random_button_clicked(self, button):
         """Sets a random wallpaper from the current view."""
-        current_view = self.view_stack.get_visible_child_name()
+        current_view = self.window.view_stack.get_visible_child_name()
         model = self.static_model.get_model() if current_view == 'static' else self.live_model.get_model()
         
         if model and model.get_n_items() > 0:
             random_pos = random.randint(0, model.get_n_items() - 1)
             self._set_wallpaper(model.get_item(random_pos))
         else:
-            self.toast_overlay.add_toast(Adw.Toast.new("No wallpapers to choose from."))
+            self.window.toast_overlay.add_toast(Adw.Toast.new("No wallpapers to choose from."))
 
     def _on_load_more_online_wallpapers_clicked(self, button):
         """Loads the next page of online wallpapers."""
@@ -1566,7 +1231,23 @@ class Manpaper(Adw.Application):
         self.right_clicked_item = item
         menu = Gio.Menu()
         if isinstance(item.path, Path) and item.path.suffix.lower() in SUPPORTED_LIVE:
-            menu.append("Recode to display resolution", "app.recode_video")
+            # Only show recode option if video resolution exceeds display resolution
+            show_recode = False
+            try:
+                monitor_width, monitor_height = get_monitor_resolution(self.window)
+                if monitor_width and monitor_height:
+                    cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', str(item.path)]
+                    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                    video_width, video_height = map(int, result.stdout.strip().split('x'))
+                    if video_width > monitor_width or video_height > monitor_height:
+                        show_recode = True
+            except (FileNotFoundError, subprocess.CalledProcessError, ValueError) as e:
+                # If we can't determine resolution, show the option to be safe
+                print(f"Could not determine video resolution for {item.path.name}: {e}")
+                show_recode = True
+            
+            if show_recode:
+                menu.append("Recode to display resolution", "app.recode_video")
         menu.append("Delete", "app.delete_wallpaper")
         menu.append("Properties", "app.show_properties")
         popover = Gtk.PopoverMenu.new_from_model(menu)
@@ -1599,41 +1280,16 @@ class Manpaper(Adw.Application):
         if not self.right_clicked_item: return
         item = self.right_clicked_item
 
-        dialog = Adw.MessageDialog.new(self.window, f"Properties for {item.wall_id}")
+        # Wrap the image loading in a lambda to start the thread
+        def load_image(item, picture):
+            threading.Thread(target=self._load_full_online_image_thread, args=(item, picture), daemon=True).start()
         
-        content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
-        dialog.set_extra_child(content_box)
-
-        # Add the image preview
-        image_preview = Gtk.Picture(content_fit=Gtk.ContentFit.CONTAIN, hexpand=True, vexpand=False)
-        image_preview.set_size_request(400, 225) # Set a reasonable size for the preview
-        content_box.append(image_preview)
-
-        # Load the full image asynchronously
-        threading.Thread(target=self._load_full_online_image_thread, args=(item, image_preview), daemon=True).start()
-
-        page = Adw.PreferencesPage.new()
-        group = Adw.PreferencesGroup()
-        page.add(group)
-        content_box.append(page)
-
-        def add_property_row(title, subtitle):
-            row = Adw.ActionRow(title=title)
-            row.set_subtitle(str(subtitle))
-            group.add(row)
-
-        add_property_row("ID", item.wall_id)
-        add_property_row("Resolution", item.resolution)
-        add_property_row("Purity", item.purity)
-        add_property_row("URL", item.full_url)
-        
-        file_type = Path(item.full_url).suffix.lstrip('.')
-        if file_type:
-            add_property_row("File Type", file_type.upper())
-        
-        dialog.add_response("close", "Close")
-        dialog.set_default_response("close")
-        dialog.present()
+        dialog = create_online_properties_dialog(
+            self.window,
+            item,
+            load_image_callback=load_image
+        )
+        dialog.present(self.window)
 
     def _load_full_online_image_thread(self, item, picture_widget):
         """Loads the full online image in a background thread for the properties dialog."""
@@ -1663,34 +1319,36 @@ class Manpaper(Adw.Application):
         """Handles the 'Delete' action for a downloaded online wallpaper."""
         if not self.right_clicked_item: return
         item = self.right_clicked_item
-
+        
         if not item.is_downloaded or not item.local_path:
-            self.toast_overlay.add_toast(Adw.Toast.new(f"'{item.wall_id}' is not downloaded."))
+            self.window.toast_overlay.add_toast(Adw.Toast.new("This wallpaper hasn't been downloaded yet."))
             return
+        
+        dialog = create_confirmation_dialog(
+            self.window,
+            title=f"Delete '{item.wall_id}'?",
+            body="This file will be permanently deleted. This action cannot be undone.",
+            confirm_text="Delete",
+            confirm_appearance=Adw.ResponseAppearance.DESTRUCTIVE,
+            callback=self._on_delete_online_dialog_response,
+            user_data=item
+        )
 
-        dialog = Adw.AlertDialog.new(f"Delete '{item.wall_id}'?")
-        dialog.set_body("This downloaded file will be permanently deleted. This action cannot be undone.")
-        dialog.add_response("cancel", "Cancel")
-        dialog.add_response("delete", "Delete")
-        dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
-        dialog.set_default_response("cancel")
-        dialog.connect("response", self._on_delete_online_dialog_response, item)
         dialog.present(self.window)
 
     def _on_delete_online_dialog_response(self, dialog, response, item):
         """Handles the response from the delete confirmation dialog for online wallpapers."""
-        if response != "delete":
-            return
-
-        try:
-            Path(item.local_path).unlink()
-            self.toast_overlay.add_toast(Adw.Toast.new(f"'{item.wall_id}' deleted."))
-            item.is_downloaded = False
-            item.local_path = None
-            item.emit('download-status-changed', False, None)
-            self._load_wallpapers_async() # Refresh the live store to remove the item if it was there
-        except OSError as e:
-            self.toast_overlay.add_toast(Adw.Toast.new(f"Error deleting file: {e}"))
+        if response == "confirm":  # Changed from "delete" to "confirm"
+            if item.local_path and os.path.exists(item.local_path):
+                try:
+                    os.remove(item.local_path)
+                    self.window.toast_overlay.add_toast(Adw.Toast.new(f"Deleted {item.wall_id}."))
+                    item.is_downloaded = False
+                    item.local_path = None
+                    item.emit('download-status-changed', False, "")
+                    self._load_wallpapers_async()
+                except OSError as e:
+                    self.window.toast_overlay.add_toast(Adw.Toast.new(f"Error deleting file: {e}"))
 
     def _update_recode_ui(self):
         """Updates the spinner and popover based on the recode queue and download tasks."""
@@ -1698,12 +1356,12 @@ class Manpaper(Adw.Application):
             # Check if there are any active recode or download tasks
             is_active = bool(self.recode_currently_running or self.recode_queue)
             print(f"_update_recode_ui: is_active={is_active}")
-            self.recode_revealer_container.set_visible(is_active)
-            revealer = self.recode_revealer_container.get_first_child()
+            self.window.recode_revealer_container.set_visible(is_active)
+            revealer = self.window.recode_revealer_container.get_first_child()
             if revealer:
                 revealer.set_reveal_child(is_active)
-            self.recode_spinner.spinning = is_active
-            print(f"_update_recode_ui: recode_spinner.spinning={self.recode_spinner.spinning}")
+            self.window.recode_spinner.spinning = is_active
+            print(f"_update_recode_ui: recode_spinner.spinning={self.window.recode_spinner.spinning}")
             
             # Clear and repopulate the popover store
             self.recode_popover_store.remove_all()
@@ -1718,11 +1376,11 @@ class Manpaper(Adw.Application):
     def _update_download_ui(self):
         """Updates the spinner and popover based on the download tasks."""
         is_active = bool(self.download_popover_store.get_n_items() > 0)
-        self.download_revealer_container.set_visible(is_active)
-        revealer = self.download_revealer_container.get_first_child()
+        self.window.download_revealer_container.set_visible(is_active)
+        revealer = self.window.download_revealer_container.get_first_child()
         if revealer:
             revealer.set_reveal_child(is_active)
-        self.download_spinner.spinning = is_active
+        self.window.download_spinner.spinning = is_active
 
     def _on_stop_one_recode_clicked(self, button, item_to_stop):
         """Stops a single recode job from the queue or the running process."""
@@ -1731,13 +1389,13 @@ class Manpaper(Adw.Application):
                 if self.recode_process:
                     try:
                         self.recode_process.terminate()
-                        self.toast_overlay.add_toast(Adw.Toast.new(f"Stopping recode for: {item_to_stop.path.name}"))
+                        self.window.toast_overlay.add_toast(Adw.Toast.new(f"Stopping recode for: {item_to_stop.path.name}"))
                     except ProcessLookupError: pass 
                 self.recode_currently_running = None
                 GLib.idle_add(self._start_next_recode_if_possible)
             elif item_to_stop in self.recode_queue:
                 self.recode_queue.remove(item_to_stop)
-                self.toast_overlay.add_toast(Adw.Toast.new(f"Removed from queue: {item_to_stop.path.name}"))
+                self.window.toast_overlay.add_toast(Adw.Toast.new(f"Removed from queue: {item_to_stop.path.name}"))
         GLib.idle_add(self._update_recode_ui)
 
     def _on_stop_one_download_clicked(self, button, item_to_stop):
@@ -1747,7 +1405,7 @@ class Manpaper(Adw.Application):
         for i in range(self.download_popover_store.get_n_items()):
             if self.download_popover_store.get_item(i) == item_to_stop:
                 self.download_popover_store.remove(i)
-                self.toast_overlay.add_toast(Adw.Toast.new(f"Removed from downloads: {item_to_stop.text}"))
+                self.window.toast_overlay.add_toast(Adw.Toast.new(f"Removed from downloads: {item_to_stop.text}"))
                 break
         GLib.idle_add(self._update_download_ui)
 
@@ -1760,8 +1418,8 @@ class Manpaper(Adw.Application):
                     try: self.recode_process.terminate()
                     except ProcessLookupError: pass
                 self.recode_currently_running = None
-        self.toast_overlay.add_toast(Adw.Toast.new("All recode jobs stopped."))
-        self.recode_button.get_popover().popdown()
+        self.window.toast_overlay.add_toast(Adw.Toast.new("All recode jobs stopped."))
+        self.window.recode_button.get_popover().popdown()
         GLib.idle_add(self._update_recode_ui)
 
     def _on_stop_all_downloads_clicked(self, button):
@@ -1771,8 +1429,8 @@ class Manpaper(Adw.Application):
         self.download_popover_store.remove_all() # This will clear the displayed items
         # We don't have direct control over running download threads started by requests.get
         # So, we just clear the UI and let the threads finish in the background.
-        self.toast_overlay.add_toast(Adw.Toast.new("All download jobs stopped."))
-        self.download_button.get_popover().popdown()
+        self.window.toast_overlay.add_toast(Adw.Toast.new("All download jobs stopped."))
+        self.window.download_button.get_popover().popdown()
         GLib.idle_add(self._update_download_ui)
     
     def _start_next_recode_if_possible(self):
@@ -1819,10 +1477,10 @@ class Manpaper(Adw.Application):
         item = self.right_clicked_item
         with self.recode_lock:
             if item in self.recode_queue or self.recode_currently_running == item:
-                self.toast_overlay.add_toast(Adw.Toast.new(f"'{item.path.name}' is already in the queue."))
+                self.window.toast_overlay.add_toast(Adw.Toast.new(f"'{item.path.name}' is already in the queue."))
                 return
             self.recode_queue.append(item)
-        self.toast_overlay.add_toast(Adw.Toast.new(f"Added '{item.path.name}' to the recode queue."))
+        self.window.toast_overlay.add_toast(Adw.Toast.new(f"Added '{item.path.name}' to the recode queue."))
         self._update_recode_ui()
         self._start_next_recode_if_possible()
 
@@ -1842,13 +1500,13 @@ class Manpaper(Adw.Application):
         if not job_was_cancelled:
             if success:
                 toast_message = f"Successfully recoded '{item.path.name}'."
-                self.toast_overlay.add_toast(Adw.Toast.new(toast_message))
+                self.window.toast_overlay.add_toast(Adw.Toast.new(toast_message))
                 GLib.idle_add(self._load_wallpapers_async)
             else:
                 if "terminated" not in (error_message or "").lower():
                     toast_message = f"Failed to recode '{item.path.name}'."
                     print(f"recoding failed for {item.path.name}: {error_message}")
-                    self.toast_overlay.add_toast(Adw.Toast.new(toast_message))
+                    self.window.toast_overlay.add_toast(Adw.Toast.new(toast_message))
         self._update_recode_ui()
         self._start_next_recode_if_possible()
         return False
@@ -1858,18 +1516,22 @@ class Manpaper(Adw.Application):
         if not self.right_clicked_item: return
         item = self.right_clicked_item
         name = item.path if isinstance(item.path, str) else item.path.name
-        dialog = Adw.AlertDialog.new(f"Delete '{name}'?")
-        dialog.set_body("This file will be permanently deleted. This action cannot be undone.")
-        dialog.add_response("cancel", "Cancel")
-        dialog.add_response("delete", "Delete")
-        dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
-        dialog.set_default_response("cancel")
-        dialog.connect("response", self._on_delete_dialog_response, item)
+        
+        dialog = create_confirmation_dialog(
+            self.window,
+            title=f"Delete '{name}'?",
+            body="This file will be permanently deleted. This action cannot be undone.",
+            confirm_text="Delete",
+            confirm_appearance=Adw.ResponseAppearance.DESTRUCTIVE,
+            callback=self._on_delete_dialog_response,
+            user_data=item
+        )
         dialog.present(self.window)
+
 
     def _on_delete_dialog_response(self, dialog, response, item):
         """Handles the response from the delete confirmation dialog."""
-        if response != "delete":
+        if response != "confirm":  # Changed from "delete" to "confirm"
             return
 
         is_url = isinstance(item.path, str)
@@ -1899,13 +1561,13 @@ class Manpaper(Adw.Application):
             
             bookmarks = [b for b in bookmarks if b.get('url') != item.path]
             self.settings.set_string('video-bookmarks', json.dumps(bookmarks))
-            self.toast_overlay.add_toast(Adw.Toast.new(f"'{name}' removed."))
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"'{name}' removed."))
         else:
             try:
                 item.path.unlink()
-                self.toast_overlay.add_toast(Adw.Toast.new(f"'{name}' deleted."))
+                self.window.toast_overlay.add_toast(Adw.Toast.new(f"'{name}' deleted."))
             except OSError as e:
-                self.toast_overlay.add_toast(Adw.Toast.new(f"Error deleting file: {e}"))
+                self.window.toast_overlay.add_toast(Adw.Toast.new(f"Error deleting file: {e}"))
 
     def _format_size(self, size_bytes):
         """Formats a file size in bytes to a human-readable string."""
@@ -1956,59 +1618,62 @@ class Manpaper(Adw.Application):
         except (FileNotFoundError, subprocess.CalledProcessError, json.JSONDecodeError, KeyError) as e:
             print(f"Could not get media properties for {name}: {e}")
 
+    def _load_static_preview(self, item, picture):
+        """Loads a preview image for static wallpaper properties dialog."""
+        try:
+            pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+                str(item.path),
+                width=800,
+                height=600,
+                preserve_aspect_ratio=True
+            )
+            texture = Gdk.Texture.new_for_pixbuf(pixbuf)
+            picture.set_paintable(texture)
+        except Exception as e:
+            print(f"Could not load preview for {item.path.name}: {e}")
+
+    def _on_delete_static_wallpaper(self, button, item):
+        """Handles delete button click from static properties dialog."""
+        try:
+            item.path.unlink()
+            # Remove from store
+            target_store = None
+            if item.path.suffix.lower() in SUPPORTED_STATIC:
+                target_store = self.static_store
+            elif item.path.suffix.lower() in SUPPORTED_LIVE:
+                target_store = self.live_store
+            
+            if target_store:
+                for i in range(target_store.get_n_items()):
+                    if target_store.get_item(i) == item:
+                        target_store.remove(i)
+                        break
+            
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Deleted {item.path.name}"))
+        except Exception as e:
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Error deleting file: {e}"))
+
     def _on_show_properties_activated(self, action, param):
         """Handles the 'Properties' action from the context menu by showing a dialog."""
         if not self.right_clicked_item: return
         item = self.right_clicked_item
         is_url = isinstance(item.path, str)
-        name = item.title or (item.path if is_url else item.path.name)
-
-        dialog = Adw.MessageDialog.new(self.window, f"Properties for {name}")
         
-        content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
-        dialog.set_extra_child(content_box)
-        page = Adw.PreferencesPage.new()
-        group = Adw.PreferencesGroup()
-        page.add(group)
-        content_box.append(page)
+        try:
+            dialog = create_properties_dialog(
+                self.window,
+                item,
+                is_url,
+                on_title_change=self._update_url_title,
+                populate_media_callback=self._populate_media_properties,
+                format_size_callback=self._format_size,
+                load_preview_callback=self._load_static_preview if not is_url else None,
+                on_delete_callback=self._on_delete_static_wallpaper if not is_url else None
+            )
+            dialog.present(self.window)
+        except FileNotFoundError:
+            self.window.toast_overlay.add_toast(Adw.Toast.new("File not found."))
 
-        def add_property_row(title, subtitle):
-            row = Adw.ActionRow(title=title)
-            row.set_subtitle(str(subtitle))
-            group.add(row)
-
-        if is_url:
-            title_entry = Adw.EntryRow(title="Title")
-            title_entry.set_text(item.title or "")
-            group.add(title_entry)
-            add_property_row("Type", "Video URL")
-            add_property_row("URL", item.path)
-        else:
-            try:
-                stat_info = item.path.stat()
-                add_property_row("Type", item.path.suffix.upper()[1:] + " File")
-                add_property_row("Path", str(item.path.parent))
-                add_property_row("Size", self._format_size(stat_info.st_size))
-                add_property_row("Last Modified", datetime.datetime.fromtimestamp(stat_info.st_mtime).strftime('%Y-%m-%d %H:%M:%S'))
-            except FileNotFoundError:
-                self.toast_overlay.add_toast(Adw.Toast.new("File not found."))
-                return
-
-        is_static = not is_url and item.path.suffix.lower() in SUPPORTED_STATIC
-        if not is_static and not is_url:
-            self._populate_media_properties(group, item)
-
-            dialog.add_response("close", "Close")
-            dialog.set_default_response("close")
-
-            def on_response(d, response_id):
-                if title_entry:
-                    new_title = title_entry.get_text().strip()
-                    if new_title and new_title != item.title:
-                        self._update_url_title(item, new_title)
-            
-            dialog.connect("response", on_response)
-            dialog.present()
 
     def _wallpaper_filter_func(self, item):
         """Filter function for static wallpapers."""
@@ -2025,8 +1690,7 @@ class Manpaper(Adw.Application):
             if backend == 'swww' and item.path.suffix.lower() != '.gif':
                 return False
             if self.hide_original_after_recode and '_recoded' not in item.path.name:
-                wallpaper_dir = self.settings.get_string('wallpaper-dir')
-                recoded_path = Path(wallpaper_dir) / 'recoded' / f"{item.path.stem}_recoded{item.path.suffix}"
+                recoded_path = item.path.parent / 'recoded' / f"{item.path.stem}_recoded{item.path.suffix}"
                 if recoded_path.exists():
                     return False
 
@@ -2043,7 +1707,7 @@ class Manpaper(Adw.Application):
 
     def _on_search_changed(self, search_entry):
         """Handles changes in the search entry text."""
-        current_view = self.view_stack.get_visible_child_name()
+        current_view = self.window.view_stack.get_visible_child_name()
         if current_view == 'online':
             self.online_search_text = search_entry.get_text()
             # self.online_filter.changed(Gtk.FilterChange.DIFFERENT)
@@ -2056,7 +1720,7 @@ class Manpaper(Adw.Application):
 
     def _on_search_activated(self, search_entry):
         """Handles when the user presses Enter in the search entry."""
-        current_view = self.view_stack.get_visible_child_name()
+        current_view = self.window.view_stack.get_visible_child_name()
         print(f"_on_search_activated called. Current view: {current_view}")
         if current_view == 'online':
             self._trigger_online_search()
@@ -2068,9 +1732,9 @@ class Manpaper(Adw.Application):
             # The state is already changed when the signal is emitted.
             # So we check if ANY button is active. If not, the one that was just
             # toggled was the last one.
-            if not self.sfw_switch.get_active() and \
-               not self.sketchy_switch.get_active() and \
-               not self.nsfw_switch.get_active():
+            if not self.window.sfw_switch.get_active() and \
+               not self.window.sketchy_switch.get_active() and \
+               not self.window.nsfw_switch.get_active():
                 switch.set_active(True)
                 return # Don't continue, as this would be a false state change.
 
@@ -2082,15 +1746,15 @@ class Manpaper(Adw.Application):
         elif name == "nsfw":
             self.settings.set_boolean('wallhaven-purity-nsfw', is_active)
 
-        if self.view_stack.get_visible_child_name() == 'online' and self.online_search_text:
+        if self.window.view_stack.get_visible_child_name() == 'online' and self.online_search_text:
             self._trigger_online_search()
 
     def _on_category_toggled(self, switch, name):
         """Handles toggling of the category switches."""
         if not switch.get_active():
-            if not self.general_switch.get_active() and \
-               not self.anime_switch.get_active() and \
-               not self.people_switch.get_active():
+            if not self.window.general_switch.get_active() and \
+               not self.window.anime_switch.get_active() and \
+               not self.window.people_switch.get_active():
                 switch.set_active(True)
                 return
 
@@ -2102,7 +1766,7 @@ class Manpaper(Adw.Application):
         elif name == "people":
             self.settings.set_boolean('wallhaven-category-people', is_active)
 
-        if self.view_stack.get_visible_child_name() == 'online':
+        if self.window.view_stack.get_visible_child_name() == 'online':
             self._trigger_online_search()
 
     def _on_resolution_changed(self, entry_row):
@@ -2110,7 +1774,7 @@ class Manpaper(Adw.Application):
         resolution_text = entry_row.get_text().strip()
         self.settings.set_string('wallhaven-resolution', resolution_text)
         self.online_resolution_text = resolution_text # Update internal state
-        if self.view_stack.get_visible_child_name() == 'online':
+        if self.window.view_stack.get_visible_child_name() == 'online':
             self._trigger_online_search()
 
     def _on_atleast_changed(self, entry_row):
@@ -2118,7 +1782,7 @@ class Manpaper(Adw.Application):
         atleast_text = entry_row.get_text().strip()
         self.settings.set_string('wallhaven-atleast', atleast_text)
         self.online_atleast_text = atleast_text # Update internal state
-        if self.view_stack.get_visible_child_name() == 'online':
+        if self.window.view_stack.get_visible_child_name() == 'online':
             self._trigger_online_search()
 
     def _on_ratio_changed(self, entry_row):
@@ -2126,7 +1790,7 @@ class Manpaper(Adw.Application):
         ratio_text = entry_row.get_text().strip()
         self.settings.set_string('wallhaven-ratios', ratio_text)
         self.online_ratio_text = ratio_text # Update internal state
-        if self.view_stack.get_visible_child_name() == 'online':
+        if self.window.view_stack.get_visible_child_name() == 'online':
             self._trigger_online_search()
 
     def _trigger_online_search(self, latest=False, page=1):
@@ -2143,15 +1807,15 @@ class Manpaper(Adw.Application):
         atleast = self.settings.get_string('wallhaven-atleast')
         ratios = self.settings.get_string('wallhaven-ratios')
 
-        sfw = self.sfw_switch.get_active()
-        sketchy = self.sketchy_switch.get_active()
-        nsfw = self.nsfw_switch.get_active()
-        general = self.general_switch.get_active()
-        anime = self.anime_switch.get_active()
-        people = self.people_switch.get_active()
+        sfw = self.window.sfw_switch.get_active()
+        sketchy = self.window.sketchy_switch.get_active()
+        nsfw = self.window.nsfw_switch.get_active()
+        general = self.window.general_switch.get_active()
+        anime = self.window.anime_switch.get_active()
+        people = self.window.people_switch.get_active()
         
         if not api_key:
-            self.toast_overlay.add_toast(Adw.Toast.new("Wallhaven API key not set in preferences."))
+            self.window.toast_overlay.add_toast(Adw.Toast.new("Wallhaven API key not set in preferences."))
             return
 
         self.background_tasks += 1
@@ -2169,7 +1833,7 @@ class Manpaper(Adw.Application):
         self._update_spinner()
 
         if "error" in results:
-            self.toast_overlay.add_toast(Adw.Toast.new(f"Online search error: {results['error']}"))
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Online search error: {results['error']}"))
             return
 
         print(f"Processed online search results: {results}")
@@ -2188,20 +1852,20 @@ class Manpaper(Adw.Application):
     def _update_status_page_visibility(self):
         """Shows or hides the 'No Results' page."""
         is_searching = bool(self.search_text) or bool(self.online_search_text)
-        current_view = self.view_stack.get_visible_child_name()
+        current_view = self.window.view_stack.get_visible_child_name()
         
         if current_view in ['static', 'live', 'online']:
             if current_view == 'static':
-                model = self.static_view.get_model()
+                model = self.window.static_view.get_model()
             elif current_view == 'live':
-                model = self.live_view.get_model()
+                model = self.window.live_view.get_model()
             else: # online
-                model = self.online_view.get_model()
+                model = self.window.online_view.get_model()
 
             show_status = is_searching and model and model.get_n_items() == 0
-            self.status_page.set_visible(show_status)
+            self.window.status_page.set_visible(show_status)
         else:
-            self.status_page.set_visible(False)
+            self.window.status_page.set_visible(False)
 
     def _prompt_directory(self, button):
         """Opens a dialog to select the wallpaper directory."""
@@ -2222,17 +1886,19 @@ class Manpaper(Adw.Application):
 
     def _on_clear_cache_clicked(self, button):
         """Clears the thumbnail cache."""
-        dialog = Adw.AlertDialog.new("Clear Cache?")
-        dialog.set_body("All cached thumbnails will be deleted. This action cannot be undone.")
-        dialog.add_response("cancel", "Cancel")
-        dialog.add_response("clear", "Clear")
-        dialog.set_response_appearance("clear", Adw.ResponseAppearance.DESTRUCTIVE)
-        dialog.set_default_response("cancel")
-        dialog.connect("response", self._on_clear_cache_dialog_response)
+        dialog = create_confirmation_dialog(
+            self.window,
+            title="Clear Cache?",
+            body="All cached thumbnails will be deleted. This action cannot be undone.",
+            confirm_text="Clear",
+            confirm_appearance=Adw.ResponseAppearance.DESTRUCTIVE,
+            callback=self._on_clear_cache_dialog_response
+        )
         dialog.present(self.window)
 
     def _on_clear_cache_dialog_response(self, dialog, response):
-        if response == "clear":
+        if response == "confirm":  # Changed from "clear" to "confirm"
+
             for f in self.cache_dir.glob('*'):
                 try:
                     f.unlink()
@@ -2240,7 +1906,7 @@ class Manpaper(Adw.Application):
                     print(f"Error deleting cache file {f}: {e}")
             
             self.texture_cache.clear()
-            self.toast_overlay.add_toast(Adw.Toast.new("Thumbnail cache cleared"))
+            self.window.toast_overlay.add_toast(Adw.Toast.new("Thumbnail cache cleared"))
 
             # Force a re-bind of all items in both views to trigger thumbnail regeneration
             for store in [self.static_store, self.live_store]:
@@ -2251,7 +1917,7 @@ class Manpaper(Adw.Application):
     def _on_reload_css_clicked(self, button):
         """Reloads the custom CSS."""
         self._update_css()
-        self.toast_overlay.add_toast(Adw.Toast.new("CSS reloaded"))
+        self.window.toast_overlay.add_toast(Adw.Toast.new("CSS reloaded"))
 
     def _on_corner_radius_changed(self, adjustment):
         """Handles changes to the corner radius setting."""
@@ -2291,7 +1957,7 @@ class Manpaper(Adw.Application):
         new_path = entry_row.get_text()
         self.mpv_socket_path = new_path
         self.settings.set_string('mpv-socket-path', new_path)
-        self.toast_overlay.add_toast(Adw.Toast.new("mpv socket path updated. Restart live wallpaper to apply."))
+        self.window.toast_overlay.add_toast(Adw.Toast.new("mpv socket path updated. Restart live wallpaper to apply."))
 
     def _on_enable_sound_toggled(self, switch, _):
         """Handles toggling the video sound setting."""
@@ -2337,19 +2003,22 @@ class Manpaper(Adw.Application):
 
     def _on_recode_all_clicked(self, button):
         """Shows a confirmation dialog before starting a batch recode."""
-        dialog = Adw.AlertDialog.new("Recode all videos?")
-        dialog.set_body("This will recode all videos with a resolution higher than your display. This may take a long time and consume significant CPU resources. Original files will not be modified.")
-        dialog.add_response("cancel", "Cancel")
-        dialog.add_response("recode", "Recode All")
-        dialog.set_response_appearance("recode", Adw.ResponseAppearance.SUGGESTED)
-        dialog.set_default_response("cancel")
-        dialog.connect("response", self._on_recode_all_dialog_response)
+        dialog = create_confirmation_dialog(
+            self.window,
+            title="Recode all videos?",
+            body="This will recode all videos with a resolution higher than your display. This may take a long time and consume significant CPU resources. Original files will not be modified.",
+            confirm_text="Recode All",
+            confirm_appearance=Adw.ResponseAppearance.SUGGESTED,
+            callback=self._on_recode_all_dialog_response
+        )
         dialog.present(self.window)
+
 
     def _on_recode_all_dialog_response(self, dialog, response):
         """Handles the response from the batch recode confirmation dialog."""
-        if response == "recode":
-            self.toast_overlay.add_toast(Adw.Toast.new("Starting batch recode..."))
+        if response == "confirm":  # Changed from "recode" to "confirm"
+
+            self.window.toast_overlay.add_toast(Adw.Toast.new("Starting batch recode..."))
             thread = threading.Thread(target=self._recode_all_thread, args=(self.window,), daemon=True)
             thread.start()
 
@@ -2357,7 +2026,7 @@ class Manpaper(Adw.Application):
         """Identifies and adds high-resolution videos to the queue."""
         monitor_width, monitor_height = get_monitor_resolution(window)
         if not monitor_width or not monitor_height:
-            GLib.idle_add(self.toast_overlay.add_toast, Adw.Toast.new("Error: Could not determine display resolution for batch recode."))
+            GLib.idle_add(self.window.toast_overlay.add_toast, Adw.Toast.new("Error: Could not determine display resolution for batch recode."))
             return
         items_to_process = [self.live_store.get_item(i) for i in range(self.live_store.get_n_items())]
         queued_count = 0
@@ -2382,7 +2051,7 @@ class Manpaper(Adw.Application):
                 print(f"Could not process {path.name} for batch recode: {e}")
                 continue
         if queued_count > 0:
-            GLib.idle_add(self.toast_overlay.add_toast, Adw.Toast.new(f"Added {queued_count} videos to the recode queue."))
+            GLib.idle_add(self.window.toast_overlay.add_toast, Adw.Toast.new(f"Added {queued_count} videos to the recode queue."))
             GLib.idle_add(self._start_next_recode_if_possible)
 
     def _on_scroll_step_changed(self, adjustment):
