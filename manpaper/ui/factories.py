@@ -191,7 +191,10 @@ def create_online_item_factory(app):
         list_item.download_status_handler_id = item.connect('download-status-changed', update_download_button_ui)
         
         list_item.get_child().set_reveal_child(False)
-        GLib.timeout_add(list_item.get_position() * 40, lambda: (list_item.get_child().set_reveal_child(True), GLib.SOURCE_REMOVE)[1])
+        # Cap reveal delay to prevent lag with large lists (roughly 2 rows of items)
+        max_stagger_items = 20
+        delay = min(list_item.get_position(), max_stagger_items) * 20
+        GLib.timeout_add(delay, lambda: (list_item.get_child().set_reveal_child(True), GLib.SOURCE_REMOVE)[1])
 
     def on_unbind(factory, list_item):
         if hasattr(list_item, 'handler_id') and list_item.get_item():
@@ -268,7 +271,17 @@ def create_wallpaper_item_factory(app):
                 list_item.picture.set_paintable(app.texture_cache[thumb_path])
         
         list_item.get_child().set_reveal_child(False)
-        GLib.timeout_add(list_item.get_position() * 40, lambda: (list_item.get_child().set_reveal_child(True), GLib.SOURCE_REMOVE)[1])
+        # Cap reveal delay to prevent lag with large lists (roughly 2 rows of items)
+        max_stagger_items = 20
+        delay = min(list_item.get_position(), max_stagger_items) * 20
+        
+        def reveal_animation():
+            child = list_item.get_child()
+            if child is not None:
+                child.set_reveal_child(True)
+            return GLib.SOURCE_REMOVE
+        
+        GLib.timeout_add(delay, reveal_animation)
 
     def on_unbind(factory, list_item):
         if hasattr(list_item, 'handler_id') and list_item.get_item():

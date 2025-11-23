@@ -24,6 +24,11 @@ from .data_models import RecodeQueueItem, WallpaperItem, OnlineWallpaperItem, Do
 from .online import search_wallhaven
 from .ui.preferences import PreferencesWindow
 from .ui.window import MainWindow
+from .ui.dialogs import (
+    create_confirmation_dialog, create_url_input_dialog,
+    create_properties_dialog, create_online_properties_dialog,
+    create_about_dialog, create_shortcuts_window
+)
 from .utils import (
     is_backend_installed, get_monitor_refresh_rate, get_monitor_resolution, 
     get_monitor_aspect_ratio, kill_backend_processes, build_command
@@ -141,6 +146,32 @@ class Manpaper(Adw.Application):
         # The mpvpaper process is no longer terminated here to allow it to persist.
         pass
 
+    def run_in_background(self, target_func, callback_func, *args, **kwargs):
+        """Helper to run a function in a background thread using GTask."""
+        task = Gio.Task.new(self, None, callback_func, None)
+        
+        # We need to capture args and kwargs to pass to the target function
+        task.target_func = target_func
+        task.args = args
+        task.kwargs = kwargs
+
+        def worker_func(task, source_object, task_data, cancellable):
+            try:
+                # Execute the blocking function
+                result = task.target_func(*task.args, **task.kwargs)
+                
+                # We can't easily pass arbitrary Python objects through return_value 
+                # if they aren't GObjects. So we attach the result to the task object itself.
+                task.python_result = result
+                task.python_error = None
+                task.return_boolean(True)
+            except Exception as e:
+                task.python_result = None
+                task.python_error = e
+                task.return_boolean(False)
+                
+        task.run_in_thread(worker_func)
+
     def send_mpv_command(self, command):
         """Sends a JSON IPC command to the mpv socket using socat."""
         if not self.mpv_socket_path:
@@ -164,23 +195,40 @@ class Manpaper(Adw.Application):
 
 
     def _update_url_title(self, item, new_title):
-        """Updates the title for a URL-based wallpaper."""
-        if not isinstance(item.path, str) or item.title == new_title:
-            return
-
+        """Updates the title of a URL-based wallpaper."""
+        print(f"DEBUG: _update_url_title called with new_title='{new_title}', old_title='{item.title}'")
+        
         try:
+            # Load existing bookmarks
             bookmarks_str = self.settings.get_string('video-bookmarks')
             bookmarks = json.loads(bookmarks_str)
         except (json.JSONDecodeError, TypeError):
             bookmarks = []
-
+        
+        # Find and update the bookmark
         for bookmark in bookmarks:
             if bookmark.get('url') == item.path:
                 bookmark['title'] = new_title
+                print(f"DEBUG: Found and updated bookmark for {item.path}")
                 break
         
+        # Save updated bookmarks
         self.settings.set_string('video-bookmarks', json.dumps(bookmarks))
-        item.props.title = new_title # Update the live object property
+        
+        # Update the item's title directly (no need to reload entire list)
+        item.title = new_title
+        
+        # Notify the list model that the item changed
+        # This will update the UI without reloading everything
+        for i in range(self.live_store.get_n_items()):
+            if self.live_store.get_item(i) == item:
+                self.live_store.items_changed(i, 1, 1)
+                break
+        
+        # Show confirmation toast
+        self.window.toast_overlay.add_toast(Adw.Toast.new(f"Title updated to: {new_title}"))
+
+
 
     def _on_add_local_clicked(self, action, param):
         """Opens a file dialog to add local video files."""
@@ -236,37 +284,39 @@ class Manpaper(Adw.Application):
                 self.window.toast_overlay.add_toast(Adw.Toast.new(f"Error selecting files: {e.message}"))
 
     def _on_add_url_clicked(self, action, param):
-        dialog = Adw.MessageDialog.new(self.window, "Add Video URL")
-        dialog.add_css_class("rounded-dialog")
-        dialog.add_response("cancel", "Cancel")
-        dialog.add_response("add", "Add")
-        dialog.set_default_response("add")
-        dialog.set_response_appearance("add", Adw.ResponseAppearance.SUGGESTED)
+        dialog = create_url_input_dialog(self.window, self._on_add_url_dialog_response)
+        dialog.present(self.window)
 
-        content_area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        entry = Gtk.Entry(placeholder_text="https://...", hexpand=True)
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        box.append(Gtk.Label(label="URL"))
-        box.append(entry)
-        content_area.append(box)
-        dialog.set_extra_child(content_area)
-
-        dialog.connect("response", self._on_add_url_dialog_response)
-        dialog.present()
 
     def _on_add_url_dialog_response(self, dialog, response_id):
-        if response_id == "add":
-            content_area = dialog.get_extra_child()
-            box = content_area.get_first_child()
-            entry = box.get_last_child()
-            url = entry.get_text().strip()
+        if response_id == "add" or response_id == "download":
+            # Access the url_entry stored on the dialog object
+            url = dialog.url_entry.get_text().strip()
             if url:
-                if url.startswith("http://") or url.startswith("https://"):
-                    self._add_url_wallpaper(url)
+                # Validate that it's a valid YouTube URL
+                if 'youtube.com' in url or 'youtu.be' in url:
+                    if url.startswith("http://") or url.startswith("https://"):
+                        if response_id == "add":
+                            # Stream directly without downloading
+                            self._add_url_wallpaper_stream(url)
+                        else:  # download
+                            # Download the video
+                            self._download_youtube_video(url)
+                    else:
+                        self.window.toast_overlay.add_toast(Adw.Toast.new("URL must start with http:// or https://"))
                 else:
-                    self.window.toast_overlay.add_toast(Adw.Toast.new("Invalid URL format."))
+                    self.window.toast_overlay.add_toast(Adw.Toast.new("Only YouTube URLs are supported."))
 
-    def _add_url_wallpaper(self, url):
+
+
+
+    def _add_url_wallpaper_stream(self, url):
+        """Adds a YouTube URL for direct streaming (original behavior)."""
+        # Check if yt-dlp is installed
+        if not is_backend_installed('yt-dlp'):
+            self.window.toast_overlay.add_toast(Adw.Toast.new("yt-dlp is not installed. Please install it to use YouTube videos."))
+            return
+        
         try:
             bookmarks_str = self.settings.get_string('video-bookmarks')
             bookmarks = json.loads(bookmarks_str)
@@ -277,13 +327,143 @@ class Manpaper(Adw.Application):
             self.window.toast_overlay.add_toast(Adw.Toast.new("URL already exists."))
             return
         
-        new_bookmark = {"url": url, "title": url}
+        # Fetch video title using yt-dlp in background
+        self.window.toast_overlay.add_toast(Adw.Toast.new("Fetching video information..."))
+        
+        def fetch_title_worker(url_to_fetch):
+            # Get video info as JSON
+            command = ['yt-dlp', '--dump-json', '--no-download', url_to_fetch]
+            result = subprocess.run(command, capture_output=True, text=True, check=True)
+            
+            # Parse JSON response
+            video_info = json.loads(result.stdout)
+            title = video_info.get('title', url_to_fetch)
+            return url_to_fetch, title
+
+        def on_fetch_title_complete(source, result, data):
+            try:
+                success = result.propagate_boolean()
+                if success:
+                    url_res, title_res = result.python_result
+                    self._add_streaming_bookmark(url_res, title_res, bookmarks)
+                else:
+                    # Fallback to URL if yt-dlp fails (captured in worker exception)
+                    print(f"Fetch title failed: {result.python_error}")
+                    self._add_streaming_bookmark(url, url, bookmarks)
+            except Exception as e:
+                self.window.toast_overlay.add_toast(Adw.Toast.new(f"Error fetching title: {str(e)}"))
+                self._add_streaming_bookmark(url, url, bookmarks)
+
+        self.run_in_background(fetch_title_worker, on_fetch_title_complete, url)
+    
+    def _add_streaming_bookmark(self, url, title, bookmarks):
+        """Adds streaming bookmark with title to settings."""
+        new_bookmark = {"url": url, "title": title}
         bookmarks.append(new_bookmark)
         self.settings.set_string('video-bookmarks', json.dumps(bookmarks))
         
-        new_item = WallpaperItem(path=url, title=url)
+        new_item = WallpaperItem(path=url, title=title)
         self.live_store.append(new_item)
-        self.window.toast_overlay.add_toast(Adw.Toast.new(f"Added wallpaper from URL"))
+        self.window.toast_overlay.add_toast(Adw.Toast.new(f"Added: {title}"))
+        return False  # For GLib.idle_add
+
+
+    def _download_youtube_video(self, url):
+        """Downloads a YouTube video at the user's resolution."""
+
+        # Check if yt-dlp is installed
+        if not is_backend_installed('yt-dlp'):
+            self.window.toast_overlay.add_toast(Adw.Toast.new("yt-dlp is not installed. Please install it to use YouTube videos."))
+            return
+        
+        # Check if URL already exists in bookmarks (already added for streaming)
+        try:
+            bookmarks_str = self.settings.get_string('video-bookmarks')
+            bookmarks = json.loads(bookmarks_str)
+        except (json.JSONDecodeError, TypeError):
+            bookmarks = []
+
+        if any(b.get('url') == url for b in bookmarks):
+            self.window.toast_overlay.add_toast(Adw.Toast.new("This URL is already added for streaming."))
+            return
+        
+        # Get user's monitor resolution
+        width, height = get_monitor_resolution(self.window)
+        if not width or not height:
+            self.window.toast_overlay.add_toast(Adw.Toast.new("Could not detect monitor resolution."))
+            return
+        
+        # Show downloading toast
+        self.window.toast_overlay.add_toast(Adw.Toast.new(f"Downloading YouTube video at {width}x{height}..."))
+        
+        # Download the video in a background thread
+        wallpaper_dir_str = self.settings.get_string('wallpaper-dir')
+        if not wallpaper_dir_str:
+            self.window.toast_overlay.add_toast(Adw.Toast.new("Wallpaper directory not set."))
+            return
+        
+        wallpaper_dir = Path(wallpaper_dir_str)
+        if not wallpaper_dir.is_dir():
+            self.window.toast_overlay.add_toast(Adw.Toast.new("Wallpaper directory not found."))
+            return
+        
+        def download_worker(url_to_download, wallpaper_dir_path, max_height):
+            # Generate a filename from the video ID
+            video_id = url_to_download.split('v=')[-1].split('&')[0] if 'v=' in url_to_download else url_to_download.split('/')[-1]
+            video_id = video_id.split('?')[0]  # Remove query parameters
+            output_path = wallpaper_dir_path / f"yt_{video_id}.mp4"
+            
+            # First, get video info to extract title
+            info_command = ['yt-dlp', '--dump-json', '--no-download', url_to_download]
+            info_result = subprocess.run(info_command, capture_output=True, text=True, check=True)
+            video_info = json.loads(info_result.stdout)
+            title = video_info.get('title', f"yt_{video_id}")
+            
+            # Download with resolution constraint matching user's display
+            # Format: bestvideo[height<=HEIGHT]+bestaudio/best[height<=HEIGHT]
+            format_string = f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]"
+            
+            command = [
+                'yt-dlp',
+                '-f', format_string,
+                '--merge-output-format', 'mp4',
+                '-o', str(output_path),
+                url_to_download
+            ]
+            
+            subprocess.run(command, capture_output=True, text=True, check=True)
+            return output_path, title
+
+        def on_download_complete(source, result, data):
+            try:
+                success = result.propagate_boolean()
+                if success:
+                    path_res, title_res = result.python_result
+                    self._on_youtube_download_complete(path_res, title_res)
+                else:
+                    error_msg = f"Failed to download YouTube video: {result.python_error}"
+                    if isinstance(result.python_error, subprocess.CalledProcessError):
+                         error_msg = f"Failed to download YouTube video: {result.python_error.stderr[:100] if result.python_error.stderr else str(result.python_error)}"
+                    self.window.toast_overlay.add_toast(Adw.Toast.new(error_msg))
+            except Exception as e:
+                self.window.toast_overlay.add_toast(Adw.Toast.new(f"Error: {str(e)}"))
+
+        self.run_in_background(download_worker, on_download_complete, url, wallpaper_dir, height)
+    
+    def _on_youtube_download_complete(self, video_path, title):
+        """Called after YouTube video download completes."""
+        try:
+            # Add only the downloaded file to live wallpapers with the YouTube title
+            new_item = WallpaperItem(path=video_path, title=title)
+            self.live_store.append(new_item)
+            
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Downloaded: {title}"))
+            self._load_wallpapers_async()  # Refresh to show the new video
+        except Exception as e:
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Error adding video: {e}"))
+        
+        return False  # For GLib.idle_add
+
 
 
 
@@ -310,8 +490,35 @@ class Manpaper(Adw.Application):
         self.download_popover_store.append(download_queue_item)
         self._update_download_ui() # Update the popover UI
 
-        thread = threading.Thread(target=self._download_wallpaper_thread, args=(item, wallpaper_dir_str, download_queue_item), daemon=True)
-        thread.start()
+        def download_worker(item_to_dl, wallpaper_dir_path):
+            print(f"Starting download for {item_to_dl.wall_id} from {item_to_dl.full_url}")
+            response = requests.get(item_to_dl.full_url, stream=True)
+            response.raise_for_status()
+            print(f"Successfully fetched content for {item_to_dl.wall_id}")
+
+            file_extension = Path(item_to_dl.full_url).suffix
+            file_path = Path(wallpaper_dir_path) / f"{item_to_dl.wall_id}{file_extension}"
+            print(f"Saving {item_to_dl.wall_id} to {file_path}")
+
+            with open(file_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            print(f"Download and save complete for {item_to_dl.wall_id}")
+            return item_to_dl, file_path
+
+        def on_download_complete(source, result, data):
+            try:
+                success = result.propagate_boolean()
+                if success:
+                    item_res, path_res = result.python_result
+                    self._on_download_finished(item_res, True, path_res, None, download_queue_item)
+                else:
+                    error_msg = str(result.python_error)
+                    self._on_download_finished(item, False, None, error_msg, download_queue_item)
+            except Exception as e:
+                self._on_download_finished(item, False, None, str(e), download_queue_item)
+
+        self.run_in_background(download_worker, on_download_complete, item, wallpaper_dir_str)
 
     def _on_apply_downloaded_wallpaper_clicked(self, button, item):
         """Handles the 'Apply' button click for a downloaded online wallpaper."""
@@ -322,30 +529,26 @@ class Manpaper(Adw.Application):
         else:
             self.window.toast_overlay.add_toast(Adw.Toast.new(f"Downloaded wallpaper not found: {item.title}"))
 
-    def _download_wallpaper_thread(self, item, wallpaper_dir, download_queue_item):
-        """Downloads a wallpaper in a background thread."""
-        try:
-            print(f"Starting download for {item.wall_id} from {item.full_url}")
-            response = requests.get(item.full_url, stream=True)
-            response.raise_for_status()
-            print(f"Successfully fetched content for {item.wall_id}")
+    def _on_delete_wallpaper_clicked(self, button, item):
+        """Handles the 'Delete' button click for a downloaded online wallpaper."""
+        print(f"Delete button clicked for {item.wall_id}")
+        if item.local_path and os.path.exists(item.local_path):
+            try:
+                os.remove(item.local_path)
+                item.is_downloaded = False
+                item.local_path = None
+                item.emit('download-status-changed', False, "")
+                self.window.toast_overlay.add_toast(Adw.Toast.new(f"Wallpaper {item.wall_id} deleted."))
+                self._load_wallpapers_async() # Reload to update UI
+            except OSError as e:
+                self.window.toast_overlay.add_toast(Adw.Toast.new(f"Error deleting wallpaper: {e}"))
+        else:
+            # It might be already deleted or path is wrong, just reset state
+            item.is_downloaded = False
+            item.local_path = None
+            item.emit('download-status-changed', False, "")
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Wallpaper file not found, status reset."))
 
-            file_extension = Path(item.full_url).suffix
-            file_path = Path(wallpaper_dir) / f"{item.wall_id}{file_extension}"
-            print(f"Saving {item.wall_id} to {file_path}")
-
-            with open(file_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            print(f"Download and save complete for {item.wall_id}")
-            
-            GLib.idle_add(self._on_download_finished, item, True, file_path, download_queue_item)
-        except requests.exceptions.RequestException as e:
-            print(f"Error downloading wallpaper: {e}")
-            GLib.idle_add(self._on_download_finished, item, False, None, str(e), download_queue_item)
-        except Exception as e:
-            print(f"An unexpected error occurred during download: {e}")
-            GLib.idle_add(self._on_download_finished, item, False, None, str(e), download_queue_item)
 
     def _on_download_finished(self, item, success, file_path=None, error_message=None, download_queue_item=None):
         """Callback after a wallpaper download is finished."""
@@ -369,34 +572,41 @@ class Manpaper(Adw.Application):
 
     def _load_online_thumbnail(self, item, picture):
         """Loads an online thumbnail in a background thread."""
-        thread = threading.Thread(target=self._load_online_thumbnail_thread, args=(item, picture), daemon=True)
-        thread.start()
-
-    def _load_online_thumbnail_thread(self, item, picture):
-        """Loads an online thumbnail in a background thread."""
-        try:
-            print(f"Attempting to download thumbnail from: {item.thumbnail_url}")
-            response = requests.get(item.thumbnail_url)
+        
+        def load_thumbnail_worker(item_to_load):
+            print(f"Attempting to download thumbnail from: {item_to_load.thumbnail_url}")
+            response = requests.get(item_to_load.thumbnail_url)
             response.raise_for_status()
-            print(f"Thumbnail downloaded successfully for {item.wall_id}")
+            print(f"Thumbnail downloaded successfully for {item_to_load.wall_id}")
             
-            # Create a pixbuf from the downloaded data
-            bytes = GLib.Bytes.new(response.content)
-            loader = GdkPixbuf.PixbufLoader.new()
-            loader.write(bytes.get_data())
-            loader.close()
-            pixbuf = loader.get_pixbuf()
-            print(f"Pixbuf created for {item.wall_id}")
+            # Return the raw bytes, create texture on main thread
+            return item_to_load, response.content
 
-            # Create a texture from the pixbuf
-            texture = Gdk.Texture.new_for_pixbuf(pixbuf)
-            print(f"Texture created for {item.wall_id}")
-            
-            GLib.idle_add(picture.set_paintable, texture)
-            print(f"Set paintable for {item.wall_id}")
+        def on_load_thumbnail_complete(source, result, data):
+            try:
+                success = result.propagate_boolean()
+                if success:
+                    item_res, content_bytes = result.python_result
+                    
+                    # Create a pixbuf from the downloaded data
+                    bytes_glib = GLib.Bytes.new(content_bytes)
+                    loader = GdkPixbuf.PixbufLoader.new()
+                    loader.write(bytes_glib.get_data())
+                    loader.close()
+                    pixbuf = loader.get_pixbuf()
+                    
+                    # Create a texture from the pixbuf
+                    texture = Gdk.Texture.new_for_pixbuf(pixbuf)
+                    picture.set_paintable(texture)
+                    print(f"Set paintable for {item_res.wall_id}")
+                else:
+                    print(f"Error loading thumbnail for {item.wall_id}: {result.python_error}")
+            except Exception as e:
+                print(f"Error processing thumbnail for {item.wall_id}: {e}")
 
-        except (requests.exceptions.RequestException, GLib.Error) as e:
-            print(f"Error loading thumbnail for {item.wall_id}: {e}")
+        self.run_in_background(load_thumbnail_worker, on_load_thumbnail_complete, item)
+
+    # _load_online_thumbnail_thread removed as it is now inline
 
 
 
@@ -617,45 +827,16 @@ class Manpaper(Adw.Application):
     def _on_shortcuts_clicked(self, *args):
         """Shows the shortcuts window."""
         self.window.menu_popover.popdown()
-        shortcuts_window = Gtk.ShortcutsWindow(transient_for=self.window)
-        section = Gtk.ShortcutsSection()
-        
-        def add_shortcut(group, title, accelerator):
-            group.append(Gtk.ShortcutsShortcut(title=title, accelerator=accelerator))
-
-        general_group = Gtk.ShortcutsGroup(title="General")
-        add_shortcut(general_group, "Toggle Search Bar", "<Control>F")
-        section.append(general_group)
-
-        nav_group = Gtk.ShortcutsGroup(title="Navigation")
-        add_shortcut(nav_group, "Go to Static Wallpapers", "<Alt>1")
-        add_shortcut(nav_group, "Go to Live Wallpapers", "<Alt>2")
-        add_shortcut(nav_group, "Go to Online Wallpapers", "<Alt>3")
-        add_shortcut(nav_group, "Go to Preferences", "<Alt>4")
-        section.append(nav_group)
-
-        view_group = Gtk.ShortcutsGroup(title="View")
-        add_shortcut(view_group, "Preview Zoom In", "<Ctrl>ScrollUp")
-        add_shortcut(view_group, "Preview Zoom Out", "<Ctrl>ScrollDown")
-        section.append(view_group)
-
-        shortcuts_window.set_child(section)
+        shortcuts_window = create_shortcuts_window(self.window)
         shortcuts_window.present()
+
 
     def _on_about_clicked(self, *args):
         """Shows the about dialog."""
         self.window.menu_popover.popdown()
-        dialog = Adw.AboutDialog(
-            application_name="Manpaper",
-            application_icon="io.hxprlee.Manpaper",
-            version="0.1",
-            developers=["Gemini", "ChatGPT", "HxprLee"],
-            designers=["HxprLee"],
-            comments="A simple wallpaper frontend for wlroots-based compositors",
-            website="https://github.com/HxprLee/manpaper",
-            issue_url="https://github.com/HxprLee/manpaper/issues"
-        )
+        dialog = create_about_dialog(self.window)
         dialog.present(self.window)
+
 
     def _on_key_pressed(self, controller, keyval, keycode, state):
         """Handles global key presses."""
@@ -899,22 +1080,64 @@ class Manpaper(Adw.Application):
                 self._set_wallpaper(item)
 
     def _set_wallpaper(self, item):
-        """Sets the system wallpaper using the configured backend."""
-        print(f"DEBUG: _set_wallpaper called for {item.path}")
-        if not isinstance(item, WallpaperItem): return
-
-        path = item.path
-        is_url = isinstance(path, str)
-        is_static = not is_url and path.suffix.lower() in SUPPORTED_STATIC
-        backend_key = 'static-backend' if is_static else 'live-backend'
-        backend = self.settings.get_string(backend_key)
-
-        if not backend:
-            backend_type = "static" if is_static else "live"
-            self.window.toast_overlay.add_toast(Adw.Toast.new(f"No {backend_type} backend configured or installed."))
+        """Sets the given item as the wallpaper."""
+        if not item:
             return
+        
+        path = item.path
+        print(f"DEBUG: _set_wallpaper called for {path}")
+        
+        is_url = isinstance(path, str) and (path.startswith('http://') or path.startswith('https://'))
+        
+        # Display name: use title if available, otherwise use filename/URL
+        display_name = item.title if item.title else (path if is_url else path.name)
+        
+        if is_url:
+            # URL-based wallpaper
+            self._set_url_wallpaper(path)
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Wallpaper set to: {display_name}"))
+        elif path.suffix.lower() in SUPPORTED_STATIC:
+            # Static wallpaper
+            self._set_static_wallpaper(path)
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Wallpaper set to: {display_name}"))
+        elif path.suffix.lower() in SUPPORTED_LIVE:
+            # Live wallpaper
+            self._set_live_wallpaper(path)
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Wallpaper set to: {display_name}"))
 
-        if backend == 'swww' and not is_static and (is_url or path.suffix.lower() != '.gif'):
+    def _set_static_wallpaper(self, path):
+        """Sets a static wallpaper using the configured backend."""
+        backend = self.settings.get_string('static-backend')
+        
+        if not backend:
+            self.window.toast_overlay.add_toast(Adw.Toast.new("No static backend configured or installed."))
+            return
+        
+        # Kill any running backend processes (e.g., mpvpaper for live wallpapers)
+        kill_backend_processes()
+        self.mpv_process = None
+        
+        name = path.name
+        command = build_command(backend, path, self.settings)
+        
+        if not command:
+            return
+        
+        try:
+            subprocess.run(command, shell=True, check=True)
+        except subprocess.CalledProcessError as e:
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Error setting wallpaper: {e}"))
+
+
+    def _set_live_wallpaper(self, path):
+        """Sets a live wallpaper using the configured backend."""
+        backend = self.settings.get_string('live-backend')
+        
+        if not backend:
+            self.window.toast_overlay.add_toast(Adw.Toast.new("No live backend configured or installed."))
+            return
+        
+        if backend == 'swww' and path.suffix.lower() != '.gif':
             self.window.toast_overlay.add_toast(Adw.Toast.new("Swww backend only supports .gif for live wallpapers."))
             return
         
@@ -938,15 +1161,45 @@ class Manpaper(Adw.Application):
                     if process.stderr:
                         for line in iter(process.stderr.readline, ''):
                             if line: print(f"[mpvpaper stderr] {line.strip()}")
-                        process.stderr.close()
+                    process.stderr.close()
                 threading.Thread(target=monitor_stderr, args=(self.mpv_process,), daemon=True).start()
                 
                 GLib.timeout_add(500, self._set_initial_mpv_state)
             else:
                 subprocess.Popen(cmd, shell=True)
+
+    def _set_url_wallpaper(self, url):
+        """Sets a URL-based wallpaper (YouTube video) using mpvpaper."""
+        backend = self.settings.get_string('live-backend')
+        
+        if backend != 'mpvpaper':
+            self.window.toast_overlay.add_toast(Adw.Toast.new("URL wallpapers require mpvpaper backend."))
+            return
+        
+        kill_backend_processes()
+        self.mpv_process = None
+        
+        # Build command for URL playback
+        cmd = build_command(backend, url, self.settings)
+        
+        if cmd:
+            resolved_socket_path = str(Path(self.mpv_socket_path).expanduser())
+            socket_file = Path(resolved_socket_path)
+            try:
+                if socket_file.exists(): socket_file.unlink()
+            except OSError as e:
+                print(f"Error removing old mpv socket: {e}")
             
-            name = path if is_url else path.name
-            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Wallpaper set to: {name}"))
+            self.mpv_process = subprocess.Popen(cmd, shell=True, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True)
+            
+            def monitor_stderr(process):
+                if process.stderr:
+                    for line in iter(process.stderr.readline, ''):
+                        if line: print(f"[mpvpaper stderr] {line.strip()}")
+                    process.stderr.close()
+            threading.Thread(target=monitor_stderr, args=(self.mpv_process,), daemon=True).start()
+            
+            GLib.timeout_add(500, self._set_initial_mpv_state)
 
     def _set_initial_mpv_state(self):
         """Sends initial volume and mute commands to a new mpvpaper instance."""
@@ -978,7 +1231,23 @@ class Manpaper(Adw.Application):
         self.right_clicked_item = item
         menu = Gio.Menu()
         if isinstance(item.path, Path) and item.path.suffix.lower() in SUPPORTED_LIVE:
-            menu.append("Recode to display resolution", "app.recode_video")
+            # Only show recode option if video resolution exceeds display resolution
+            show_recode = False
+            try:
+                monitor_width, monitor_height = get_monitor_resolution(self.window)
+                if monitor_width and monitor_height:
+                    cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', str(item.path)]
+                    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                    video_width, video_height = map(int, result.stdout.strip().split('x'))
+                    if video_width > monitor_width or video_height > monitor_height:
+                        show_recode = True
+            except (FileNotFoundError, subprocess.CalledProcessError, ValueError) as e:
+                # If we can't determine resolution, show the option to be safe
+                print(f"Could not determine video resolution for {item.path.name}: {e}")
+                show_recode = True
+            
+            if show_recode:
+                menu.append("Recode to display resolution", "app.recode_video")
         menu.append("Delete", "app.delete_wallpaper")
         menu.append("Properties", "app.show_properties")
         popover = Gtk.PopoverMenu.new_from_model(menu)
@@ -1011,48 +1280,15 @@ class Manpaper(Adw.Application):
         if not self.right_clicked_item: return
         item = self.right_clicked_item
 
-        dialog = Adw.Dialog()
-        dialog.set_title(f"Properties for {item.wall_id}")
-
+        # Wrap the image loading in a lambda to start the thread
+        def load_image(item, picture):
+            threading.Thread(target=self._load_full_online_image_thread, args=(item, picture), daemon=True).start()
         
-        toolbar_view = Adw.ToolbarView()
-        
-        header_bar = Adw.HeaderBar()
-        toolbar_view.add_top_bar(header_bar)
-        
-        page = Adw.PreferencesPage()
-        toolbar_view.set_content(page)
-        
-        dialog.set_child(toolbar_view)
-
-        # Add the image preview
-        image_group = Adw.PreferencesGroup()
-        page.add(image_group)
-        
-        image_preview = Gtk.Picture(content_fit=Gtk.ContentFit.CONTAIN, hexpand=True, vexpand=False)
-        image_preview.set_size_request(400, 225) # Set a reasonable size for the preview
-        image_group.add(image_preview)
-
-        # Load the full image asynchronously
-        threading.Thread(target=self._load_full_online_image_thread, args=(item, image_preview), daemon=True).start()
-
-        group = Adw.PreferencesGroup()
-        page.add(group)
-
-        def add_property_row(title, subtitle):
-            row = Adw.ActionRow(title=title)
-            row.set_subtitle(str(subtitle))
-            group.add(row)
-
-        add_property_row("ID", item.wall_id)
-        add_property_row("Resolution", item.resolution)
-        add_property_row("Purity", item.purity)
-        add_property_row("URL", item.full_url)
-        
-        file_type = Path(item.full_url).suffix.lstrip('.')
-        if file_type:
-            add_property_row("File Type", file_type.upper())
-        
+        dialog = create_online_properties_dialog(
+            self.window,
+            item,
+            load_image_callback=load_image
+        )
         dialog.present(self.window)
 
     def _load_full_online_image_thread(self, item, picture_widget):
@@ -1083,34 +1319,36 @@ class Manpaper(Adw.Application):
         """Handles the 'Delete' action for a downloaded online wallpaper."""
         if not self.right_clicked_item: return
         item = self.right_clicked_item
-
+        
         if not item.is_downloaded or not item.local_path:
-            self.window.toast_overlay.add_toast(Adw.Toast.new(f"'{item.wall_id}' is not downloaded."))
+            self.window.toast_overlay.add_toast(Adw.Toast.new("This wallpaper hasn't been downloaded yet."))
             return
+        
+        dialog = create_confirmation_dialog(
+            self.window,
+            title=f"Delete '{item.wall_id}'?",
+            body="This file will be permanently deleted. This action cannot be undone.",
+            confirm_text="Delete",
+            confirm_appearance=Adw.ResponseAppearance.DESTRUCTIVE,
+            callback=self._on_delete_online_dialog_response,
+            user_data=item
+        )
 
-        dialog = Adw.AlertDialog.new(f"Delete '{item.wall_id}'?")
-        dialog.set_body("This downloaded file will be permanently deleted. This action cannot be undone.")
-        dialog.add_response("cancel", "Cancel")
-        dialog.add_response("delete", "Delete")
-        dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
-        dialog.set_default_response("cancel")
-        dialog.connect("response", self._on_delete_online_dialog_response, item)
         dialog.present(self.window)
 
     def _on_delete_online_dialog_response(self, dialog, response, item):
         """Handles the response from the delete confirmation dialog for online wallpapers."""
-        if response != "delete":
-            return
-
-        try:
-            Path(item.local_path).unlink()
-            self.window.toast_overlay.add_toast(Adw.Toast.new(f"'{item.wall_id}' deleted."))
-            item.is_downloaded = False
-            item.local_path = None
-            item.emit('download-status-changed', False, None)
-            self._load_wallpapers_async() # Refresh the live store to remove the item if it was there
-        except OSError as e:
-            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Error deleting file: {e}"))
+        if response == "confirm":  # Changed from "delete" to "confirm"
+            if item.local_path and os.path.exists(item.local_path):
+                try:
+                    os.remove(item.local_path)
+                    self.window.toast_overlay.add_toast(Adw.Toast.new(f"Deleted {item.wall_id}."))
+                    item.is_downloaded = False
+                    item.local_path = None
+                    item.emit('download-status-changed', False, "")
+                    self._load_wallpapers_async()
+                except OSError as e:
+                    self.window.toast_overlay.add_toast(Adw.Toast.new(f"Error deleting file: {e}"))
 
     def _update_recode_ui(self):
         """Updates the spinner and popover based on the recode queue and download tasks."""
@@ -1278,18 +1516,22 @@ class Manpaper(Adw.Application):
         if not self.right_clicked_item: return
         item = self.right_clicked_item
         name = item.path if isinstance(item.path, str) else item.path.name
-        dialog = Adw.AlertDialog.new(f"Delete '{name}'?")
-        dialog.set_body("This file will be permanently deleted. This action cannot be undone.")
-        dialog.add_response("cancel", "Cancel")
-        dialog.add_response("delete", "Delete")
-        dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
-        dialog.set_default_response("cancel")
-        dialog.connect("response", self._on_delete_dialog_response, item)
+        
+        dialog = create_confirmation_dialog(
+            self.window,
+            title=f"Delete '{name}'?",
+            body="This file will be permanently deleted. This action cannot be undone.",
+            confirm_text="Delete",
+            confirm_appearance=Adw.ResponseAppearance.DESTRUCTIVE,
+            callback=self._on_delete_dialog_response,
+            user_data=item
+        )
         dialog.present(self.window)
+
 
     def _on_delete_dialog_response(self, dialog, response, item):
         """Handles the response from the delete confirmation dialog."""
-        if response != "delete":
+        if response != "confirm":  # Changed from "delete" to "confirm"
             return
 
         is_url = isinstance(item.path, str)
@@ -1376,66 +1618,62 @@ class Manpaper(Adw.Application):
         except (FileNotFoundError, subprocess.CalledProcessError, json.JSONDecodeError, KeyError) as e:
             print(f"Could not get media properties for {name}: {e}")
 
+    def _load_static_preview(self, item, picture):
+        """Loads a preview image for static wallpaper properties dialog."""
+        try:
+            pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+                str(item.path),
+                width=800,
+                height=600,
+                preserve_aspect_ratio=True
+            )
+            texture = Gdk.Texture.new_for_pixbuf(pixbuf)
+            picture.set_paintable(texture)
+        except Exception as e:
+            print(f"Could not load preview for {item.path.name}: {e}")
+
+    def _on_delete_static_wallpaper(self, button, item):
+        """Handles delete button click from static properties dialog."""
+        try:
+            item.path.unlink()
+            # Remove from store
+            target_store = None
+            if item.path.suffix.lower() in SUPPORTED_STATIC:
+                target_store = self.static_store
+            elif item.path.suffix.lower() in SUPPORTED_LIVE:
+                target_store = self.live_store
+            
+            if target_store:
+                for i in range(target_store.get_n_items()):
+                    if target_store.get_item(i) == item:
+                        target_store.remove(i)
+                        break
+            
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Deleted {item.path.name}"))
+        except Exception as e:
+            self.window.toast_overlay.add_toast(Adw.Toast.new(f"Error deleting file: {e}"))
+
     def _on_show_properties_activated(self, action, param):
         """Handles the 'Properties' action from the context menu by showing a dialog."""
         if not self.right_clicked_item: return
         item = self.right_clicked_item
         is_url = isinstance(item.path, str)
-        name = item.title or (item.path if is_url else item.path.name)
-
-        dialog = Adw.Dialog()
-        dialog.set_title(f"Properties for {name}")
-
         
-        toolbar_view = Adw.ToolbarView()
-        
-        header_bar = Adw.HeaderBar()
-        toolbar_view.add_top_bar(header_bar)
-        
-        page = Adw.PreferencesPage()
-        toolbar_view.set_content(page)
-        
-        dialog.set_child(toolbar_view)
+        try:
+            dialog = create_properties_dialog(
+                self.window,
+                item,
+                is_url,
+                on_title_change=self._update_url_title,
+                populate_media_callback=self._populate_media_properties,
+                format_size_callback=self._format_size,
+                load_preview_callback=self._load_static_preview if not is_url else None,
+                on_delete_callback=self._on_delete_static_wallpaper if not is_url else None
+            )
+            dialog.present(self.window)
+        except FileNotFoundError:
+            self.window.toast_overlay.add_toast(Adw.Toast.new("File not found."))
 
-        group = Adw.PreferencesGroup()
-        page.add(group)
-
-        def add_property_row(title, subtitle):
-            row = Adw.ActionRow(title=title)
-            row.set_subtitle(str(subtitle))
-            group.add(row)
-        
-        title_entry = None
-        if is_url:
-            title_entry = Adw.EntryRow(title="Title")
-            title_entry.set_text(item.title or "")
-            group.add(title_entry)
-            add_property_row("Type", "Video URL")
-            add_property_row("URL", item.path)
-        else:
-            try:
-                stat_info = item.path.stat()
-                add_property_row("Type", item.path.suffix.upper()[1:] + " File")
-                add_property_row("Path", str(item.path.parent))
-                add_property_row("Size", self._format_size(stat_info.st_size))
-                add_property_row("Last Modified", datetime.datetime.fromtimestamp(stat_info.st_mtime).strftime('%Y-%m-%d %H:%M:%S'))
-            except FileNotFoundError:
-                self.window.toast_overlay.add_toast(Adw.Toast.new("File not found."))
-                return
-
-        is_static = not is_url and item.path.suffix.lower() in SUPPORTED_STATIC
-        if not is_static and not is_url:
-            self._populate_media_properties(group, item)
-
-        def on_close(d):
-            if title_entry:
-                new_title = title_entry.get_text().strip()
-                if new_title and new_title != item.title:
-                    self._update_url_title(item, new_title)
-            dialog.close()
-            
-        dialog.connect("close-attempt", on_close)
-        dialog.present(self.window)
 
     def _wallpaper_filter_func(self, item):
         """Filter function for static wallpapers."""
@@ -1452,8 +1690,7 @@ class Manpaper(Adw.Application):
             if backend == 'swww' and item.path.suffix.lower() != '.gif':
                 return False
             if self.hide_original_after_recode and '_recoded' not in item.path.name:
-                wallpaper_dir = self.settings.get_string('wallpaper-dir')
-                recoded_path = Path(wallpaper_dir) / 'recoded' / f"{item.path.stem}_recoded{item.path.suffix}"
+                recoded_path = item.path.parent / 'recoded' / f"{item.path.stem}_recoded{item.path.suffix}"
                 if recoded_path.exists():
                     return False
 
@@ -1649,17 +1886,19 @@ class Manpaper(Adw.Application):
 
     def _on_clear_cache_clicked(self, button):
         """Clears the thumbnail cache."""
-        dialog = Adw.AlertDialog.new("Clear Cache?")
-        dialog.set_body("All cached thumbnails will be deleted. This action cannot be undone.")
-        dialog.add_response("cancel", "Cancel")
-        dialog.add_response("clear", "Clear")
-        dialog.set_response_appearance("clear", Adw.ResponseAppearance.DESTRUCTIVE)
-        dialog.set_default_response("cancel")
-        dialog.connect("response", self._on_clear_cache_dialog_response)
+        dialog = create_confirmation_dialog(
+            self.window,
+            title="Clear Cache?",
+            body="All cached thumbnails will be deleted. This action cannot be undone.",
+            confirm_text="Clear",
+            confirm_appearance=Adw.ResponseAppearance.DESTRUCTIVE,
+            callback=self._on_clear_cache_dialog_response
+        )
         dialog.present(self.window)
 
     def _on_clear_cache_dialog_response(self, dialog, response):
-        if response == "clear":
+        if response == "confirm":  # Changed from "clear" to "confirm"
+
             for f in self.cache_dir.glob('*'):
                 try:
                     f.unlink()
@@ -1764,18 +2003,21 @@ class Manpaper(Adw.Application):
 
     def _on_recode_all_clicked(self, button):
         """Shows a confirmation dialog before starting a batch recode."""
-        dialog = Adw.AlertDialog.new("Recode all videos?")
-        dialog.set_body("This will recode all videos with a resolution higher than your display. This may take a long time and consume significant CPU resources. Original files will not be modified.")
-        dialog.add_response("cancel", "Cancel")
-        dialog.add_response("recode", "Recode All")
-        dialog.set_response_appearance("recode", Adw.ResponseAppearance.SUGGESTED)
-        dialog.set_default_response("cancel")
-        dialog.connect("response", self._on_recode_all_dialog_response)
+        dialog = create_confirmation_dialog(
+            self.window,
+            title="Recode all videos?",
+            body="This will recode all videos with a resolution higher than your display. This may take a long time and consume significant CPU resources. Original files will not be modified.",
+            confirm_text="Recode All",
+            confirm_appearance=Adw.ResponseAppearance.SUGGESTED,
+            callback=self._on_recode_all_dialog_response
+        )
         dialog.present(self.window)
+
 
     def _on_recode_all_dialog_response(self, dialog, response):
         """Handles the response from the batch recode confirmation dialog."""
-        if response == "recode":
+        if response == "confirm":  # Changed from "recode" to "confirm"
+
             self.window.toast_overlay.add_toast(Adw.Toast.new("Starting batch recode..."))
             thread = threading.Thread(target=self._recode_all_thread, args=(self.window,), daemon=True)
             thread.start()
